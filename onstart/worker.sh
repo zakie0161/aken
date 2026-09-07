@@ -9,8 +9,10 @@ set -uo pipefail
 
 PYWORKER_REPO="${PYWORKER_REPO:-https://github.com/vast-ai/pyworker.git}"
 PYWORKER_REF="${PYWORKER_REF:-main}"
-PYWORKER_WORKER="${PYWORKER_WORKER:-comfyui-json}"
-PYWORKER_DIR="${PYWORKER_DIR:-/workspace/pyworker}"
+BACKEND="${BACKEND:-comfyui-json}"
+WS="${WORKSPACE:-/workspace}"
+# HARUS sama dengan SERVER_DIR di start_server.sh resmi: $WORKSPACE_DIR/vast-pyworker
+PYWORKER_DIR="${PYWORKER_DIR:-$WS/vast-pyworker}"
 STACK_REF="${STACK_REF:-main}"
 STACK_REPO="${STACK_REPO:-https://github.com/zakie0161/aken.git}"
 LOG="[stack-onstart]"
@@ -18,7 +20,7 @@ LOG="[stack-onstart]"
 log() { echo "$LOG $*"; }
 
 main() {
-  log "mulai (SERVERLESS=${SERVERLESS:-unset})"
+  log "mulai (SERVERLESS=${SERVERLESS:-unset}, BACKEND=$BACKEND, dir=$PYWORKER_DIR)"
 
   [[ -d "$PYWORKER_DIR/.git" ]] || git clone --depth 1 --branch "$PYWORKER_REF" "$PYWORKER_REPO" "$PYWORKER_DIR" || return 1
 
@@ -29,19 +31,21 @@ main() {
     ( cd "$tmp" && git fetch --depth 1 origin "$STACK_REF" -q && git reset --hard -q "origin/$STACK_REF" )
   fi
 
-  # kalau provisioning sudah menghasilkan benchmark, pakai itu; kalau belum, ambil dari repo
-  local dst="$PYWORKER_DIR/workers/$PYWORKER_WORKER/misc"
+  local dst="$PYWORKER_DIR/workers/$BACKEND/misc"
   mkdir -p "$dst"
-  if [[ -s /workspace/stack/benchmark.json ]]; then
-    cp -f /workspace/stack/benchmark.json "$dst/benchmark.json"
-    log "benchmark dari stack spec ($(wc -c < "$dst/benchmark.json") byte)"
+  if [[ -s "$WS/stack/benchmark.json" ]]; then
+    cp -f "$WS/stack/benchmark.json" "$dst/benchmark.json"
+    log "benchmark dari stack spec -> $dst/benchmark.json ($(wc -c < "$dst/benchmark.json") byte)"
   elif [[ -s "$tmp/stack/benchmark.example.json" ]]; then
     cp -f "$tmp/stack/benchmark.example.json" "$dst/benchmark.json"
     log "benchmark dari contoh repo (placeholder - ganti lewat spec!)"
   else
-    log "tidak ada benchmark custom, pakai bawaan repo pyworker"
+    log "tidak ada benchmark custom, worker pakai bawaan repo pyworker"
   fi
 
+  # start_server.sh clones ke $WORKSPACE_DIR/vast-pyworker; kalau foldernya sudah ada,
+  # dia cuma fetch/checkout/pull - benchmark.json kita (untracked) tetap selamat.
+  export BACKEND WORKSPACE_DIR="$WS"
   cd "$PYWORKER_DIR" || return 1
   exec bash -c "curl -fsSL https://raw.githubusercontent.com/vast-ai/pyworker/$PYWORKER_REF/start_server.sh | bash"
 }
