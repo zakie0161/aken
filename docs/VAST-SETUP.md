@@ -40,9 +40,9 @@ Lisensi bobot mengecualikan **Uni Eropa, Inggris, Korea Selatan, AS** dari hosti
 bobot maupun output. Autoscaler Vast merekrut host dari pasar global, jadi wilayah harus
 disaring di `search_params`.
 
-Yang **tidak** berfungsi: `geolocation='Japan, JP'` (selalu 0 hasil). Yang berfungsi:
-`geolocode in [ ... ]` — integer per negara, stabil, dan gagal-tertutup (kode tak dikenal
-tidak direkrut). Peta dari pasar 2026-09-07 (kode = geolocode):
+Yang **tidak** berfungsi di `search offers`: `geolocation='Japan, JP'` / `Japan_JP` (0 hasil).
+Yang berfungsi di `search offers`: `geolocode in [ ... ]` (integer per negara — peta di bawah).
+Tapi lihat kotak berikutnya: **untuk workergroup field-nya beda.**
 
 | izinkan | kode |
 |---|---|
@@ -76,9 +76,31 @@ kita keluarkan sebagai sikap konservatif: NO 1365332043 · IS 838430027 · CH 64
 UA 1783234984 · RS 1379428621 · MK 1565616317 · AM 740302200 · TR 1755869950 · AD 369836420.
 
 Dampak ke pool (2026-09-07, `num_gpus=1 gpu_ram>=32 disk_space>=200`): 164 offer tanpa filter
-→ **43 offer** dengan allow-list di atas; 17 di antaranya RTX 5090. Masih lega.
-Peta ini harus dicek ulang kalau Vast menambah negara — `search offers` lalu cocokkan
-`geolocode` vs `geolocation`.
+→ **43 offer** dengan allow-list; 17 di antaranya RTX 5090. Masih lega.
+Tabel integer di atas cuma buat **cross-check** hasil `search offers`, bukan buat `search_params`.
+
+### ⚠️ Field geo yang benar di workergroup: `geolocation`, bukan `geolocode`
+Mesin autoscaling **mengabaikan** `geolocode` — nilainya cuma tersimpan di `search_query` tanpa
+ditegakkan. Buktinya di sesi ini: worker pertama mendarat di Malaysia (benar), lalu setelah daur
+ulang mendarat di `North Carolina, US` — padahal allow-list nggak menyebut US.
+
+Yang ditegakkan: **kode negara 2 huruf** di `geolocation` (SDK meng-hash-nya ke geolocode sendiri).
+```bash
+vastai create workergroup --template_hash <HASH> --endpoint_name vs-a1 --gpu_ram 32 \
+  --search_params "num_gpus=1 gpu_name=RTX_5090 disk_space>=200 inet_down>=500 verified=true \
+    geolocation in [JP,TW,TH,VN,HK,CN,ID,MY,IN,AE,SA,LK,AU,NZ,CA,MX,AR,CL,ZA,JO,SG]"
+```
+`geolocation notin [US,GB,KR,...]` juga jalan, tapi **allow-list lebih aman**: fail-closed, jadi
+negara baru yang belum dipetakan nggak akan pernah direkrut.
+
+Verifikasi query sebelum percaya (harus nol US/GB/KR):
+```bash
+vastai search offers "gpu_name=RTX_5090 num_gpus=1 rentable=true geolocation in [JP,TW,MY]" --raw \
+  | python3 -c "import json,sys,collections;d=json.load(sys.stdin);\
+print(collections.Counter((x['geolocation'] or '').split(',')[-1].strip() for x in d))"
+```
+Dan verifikasi **tersimpan** sebagai constraint setelah create:
+`vastai show workergroups --raw` → `search_query.geolocation = {'in': [...]}`.
 
 ## Catatan yang bikin pusing kalau kelupaan
 - **`PORTAL_CONFIG` wajib menyertakan `API Wrapper`.** Kalau tidak, `api-wrapper.sh` nge-grep
