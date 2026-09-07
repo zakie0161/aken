@@ -47,6 +47,27 @@ dl() { # repo rev path target size
   echo "$LOG ok $name ($size)"
 }
 
+install_pyworker() {
+  # start_server.sh resmi meng-clone ke "$WORKSPACE_DIR/vast-pyworker"; kalau foldernya sudah
+  # ada, dia cuma fetch/checkout - benchmark.json kita (untracked) tetap selamat.
+  local repo="${PYWORKER_REPO:-https://github.com/vast-ai/pyworker}"
+  local ref="${PYWORKER_REF:-main}"
+  local backend="${BACKEND:-comfyui-json}"
+  local dir="${PYWORKER_DIR:-$WS/vast-pyworker}"
+  if [[ ! -d "$dir/.git" ]]; then
+    echo "$LOG clone pyworker -> $dir" || true
+    git clone --depth 1 --branch "$ref" "$repo" "$dir" || { echo "$LOG GAGAL clone pyworker"; return 1; }
+  fi
+  local dst="$dir/workers/$backend/misc"
+  if [[ -s "$WORK/benchmark.json" ]]; then
+    mkdir -p "$dst"
+    cp -f "$WORK/benchmark.json" "$dst/benchmark.json"
+    echo "$LOG benchmark terpasang: $dst/benchmark.json ($(wc -c < "$dst/benchmark.json") byte)"
+  else
+    echo "$LOG tidak ada benchmark dari spec - worker pakai bawaan"
+  fi
+}
+
 main() {
   echo "$LOG mulai; workspace=$WS"
   fetch_spec
@@ -72,15 +93,16 @@ PY
 
   # graph benchmark + profil kerja -> dipakai PyWorker & client
   $PY - "$SPEC" "$WORK" <<'PY'
-import json,sys
+import json,sys,os
 spec,ws=json.load(open(sys.argv[1])),sys.argv[2]
-import os
 os.makedirs(ws,exist_ok=True)
 for key,name in (("benchmark","benchmark.json"),("profiles","profiles.json")):
     if key in spec:
-        open(f"{ws}/stack/{name}","w").write(json.dumps(spec[key],indent=1))
+        open(f"{ws}/{name}","w").write(json.dumps(spec[key],indent=1))
         print(f"[stack] tulis {name}")
 PY
+
+  install_pyworker
 
   # cron pembersih output lama
   if ! crontab -l 2>/dev/null | grep -qF 'stack-clean'; then
