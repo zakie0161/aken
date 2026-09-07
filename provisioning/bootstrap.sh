@@ -9,6 +9,9 @@
 set -uo pipefail
 
 WS="${STACK_WORKSPACE:-/workspace}"
+COMFYUI_DIR="${COMFYUI_DIR:-$WS/ComfyUI}"
+MODELS="${STACK_MODELS_DIR:-$COMFYUI_DIR/models}"
+WORK="${STACK_WORK_DIR:-$WS/stack}"
 SPEC_URL="${STACK_SPEC_URL:-}"
 JOBS="${STACK_JOBS:-3}"
 SPEC="$WS/stack-spec.json"
@@ -61,18 +64,18 @@ PY
   local n=0
   while IFS='|' read -r repo rev path sub want; do
     [[ -z "$repo" ]] && continue
-    dl "$repo" "$rev" "$path" "$WS/models/$sub" "$want" &
+    dl "$repo" "$rev" "$path" "$MODELS/$sub" "$want" &
     n=$((n+1))
     while [[ "$(jobs -rp | wc -l)" -ge "$JOBS" ]]; do wait -n; done
   done <<< "$list"
   wait || die "ada file yang gagal ($n item)"
 
   # graph benchmark + profil kerja -> dipakai PyWorker & client
-  $PY - "$SPEC" "$WS" <<'PY'
+  $PY - "$SPEC" "$WORK" <<'PY'
 import json,sys
 spec,ws=json.load(open(sys.argv[1])),sys.argv[2]
 import os
-os.makedirs(f"{ws}/stack",exist_ok=True)
+os.makedirs(ws,exist_ok=True)
 for key,name in (("benchmark","benchmark.json"),("profiles","profiles.json")):
     if key in spec:
         open(f"{ws}/stack/{name}","w").write(json.dumps(spec[key],indent=1))
@@ -82,9 +85,9 @@ PY
   # cron pembersih output lama
   if ! crontab -l 2>/dev/null | grep -qF 'stack-clean'; then
     ( crontab -l 2>/dev/null; echo "# stack-clean"; \
-      echo '*/15 * * * * find '"$COMFYUI_DIR:-$WS/ComfyUI"'/output -type f -mmin +1440 -delete' ) | crontab -
+      echo '*/15 * * * * find '"$COMFYUI_DIR"'/output -type f -mmin +1440 -delete' ) | crontab -
   fi
-  echo "$LOG selesai"; du -sh "$WS/models"/* 2>/dev/null | sed "s/^/$LOG   /"
+  echo "$LOG selesai"; du -sh "$MODELS"/* 2>/dev/null | sed "s/^/$LOG   /"
 }
 
 main "$@"
