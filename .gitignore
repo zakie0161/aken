@@ -1,0 +1,6 @@
+# spec asli + catatan internal jangan pernah ke-push
+stack/spec.local.json
+notes/
+*.local.json
+__pycache__/
+*.pyc

@@ -1,0 +1,38 @@
+{
+  "_comment": "Contoh bentuk stack spec. Nilai di sini placeholder. Spec asli di-host sebagai gist publik (URL acak, tanpa kredensial) dan ditunjuk lewat env STACK_SPEC_URL.",
+  "id": "stack-example",
+  "comfy_image": "vastai/comfy:v0.34.0-cuda-13.2-py312",
+  "files": [
+    {
+      "repo": "CONTRIB/publishing-repo",
+      "rev": "0000000000000000000000000000000000000000",
+      "path": "diffusion_models/example_int8.safetensors",
+      "subdir": "diffusion_models",
+      "size": 12345678901
+    },
+    {
+      "repo": "CONTRIB/publishing-repo",
+      "rev": "0000000000000000000000000000000000000000",
+      "path": "text_encoders/example_nvfp4.safetensors",
+      "subdir": "text_encoders",
+      "size": 9876543210
+    }
+  ],
+  "benchmark": {
+    "1": { "class_type": "UNETLoader", "inputs": { "unet_name": "example_int8.safetensors", "weight_dtype": "default" } }
+  },
+  "profiles": {
+    "small": {
+      "label": "contoh profil murah",
+      "graph": { "1": { "class_type": "UNETLoader", "inputs": { "unet_name": "example_int8.safetensors" } } },
+      "expect_seconds": 5
+    }
+  },
+  "runtime_env": {
+    "COMFYUI_ARGS": "--disable-auto-launch --port 18188 --enable-cors-header"
+  },
+  "hardware": {
+    "search_params": "num_gpus=1 gpu_ram>=32 disk_space>=200 inet_down>=400 verified=true",
+    "gpu_ram": 32
+  }
+}
