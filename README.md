@@ -5,17 +5,23 @@ lewat env) menentukan bobot yang diunduh, graph benchmark, dan profil kerja.
 **Tidak ada kredensial maupun identitas model di repo ini** - semuanya di spec.
 
 ```
-provisioning/bootstrap.sh   PROVISIONING_SCRIPT: unduh files[] dari spec, cek byte-size, tulis graph
-onstart/worker.sh           onstart: pasang PyWorker + tukar benchmark.json dari spec
+provisioning/bootstrap.sh   PROVISIONING_SCRIPT: unduh files[] dari spec, cek byte-size,
+                            pasang PyWorker + tulis benchmark.json ke tree-nya
 tools/stackctl.py           klien: --list / --profile X --local URL | --endpoint NAMA
 stack/spec.example.json     bentuk spec (nilai placeholder)
 docs/VAST-SETUP.md          perintah vastai + catatan kepatuhan wilayah
 ```
 
 ## Alur
-1. Taruh spec aslimu di URL publik tanpa auth (gist = URL acak, isinya bukan rahasia).
-2. Set env template: `STACK_SPEC_URL=https://gist.githubusercontent.com/.../spec.json`
-3. Worker boot → `bootstrap.sh` sedot `files[]` → `worker.sh` pasang PyWorker + benchmark → engine siap.
+1. Taruh spec aslimu di URL publik tanpa auth (repo HF bernama netral, atau gist).
+2. Env template: `STACK_SPEC_URL=<url spec>` + `PROVISIONING_SCRIPT=<url bootstrap.sh>`,
+   dan **`--onstart-cmd entrypoint.sh`** — jangan diganti, kalau diganti provisioning tidak jalan.
+3. Worker boot: `entrypoint.sh` → provisioning unduh bobot + pasang PyWorker/benchmark →
+   ComfyUI start → api-wrapper start → `BACKENDS_READY` → PyWorker benchmark → siap melayani.
+
+Rantai readiness harus utuh (putus satu = worker diam di `model_loading`):
+`PORTAL_CONFIG` memuat `API Wrapper` → api-wrapper hidup di 18288 → `COMFYUI_API_BASE`
+menunjuk 18188 (bukan 8188 yang kena 401 caddy) → `BACKENDS_READY` tercetak → benchmark jalan.
 
 ```bash
 python3 tools/stackctl.py --spec stack/spec.example.json --list

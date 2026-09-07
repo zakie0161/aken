@@ -1,20 +1,30 @@
 # Setup Vast
 
+Config yang **sudah terbukti jalan** per 2026-09-07 (template dibuat baru tiap perubahan,
+bukan di-edit - lihat Catatan):
+
 ```bash
 RAW=https://raw.githubusercontent.com/zakie0161/aken/main
+SPEC=https://huggingface.co/zakie0161/cfg-9f3a/resolve/main/spec.json
 
-vastai update template <TEMPLATE_ID> \
-  --env "-p 1111:1111 -p 8188:8188 -p 18188:18188 -e OPEN_BUTTON_PORT=1111 -e OPEN_BUTTON_TOKEN=1 \
+vastai create template --name "vs-a1 stack" \
+  --image vastai/comfy --image_tag v0.34.0-cuda-13.2-py312 \
+  --ssh --direct --disk_space 200 \
+  --env "-p 1111:1111 -p 8188:8188 -p 18188:18188 -p 18288:18288 \
+ -e OPEN_BUTTON_PORT=1111 -e OPEN_BUTTON_TOKEN=1 \
  -e DATA_DIRECTORY=/workspace/ -e JUPYTER_DIR=/ \
- -e PORTAL_CONFIG=\"localhost:1111:11111:/:Instance Portal|localhost:8188:18188:/:ComfyUI|localhost:8080:18080:/:Jupyter\" \
+ -e PORTAL_CONFIG=\"localhost:1111:11111:/:Instance Portal|localhost:8188:18188:/:ComfyUI|localhost:8080:18080:/:Jupyter|localhost:18288:18288:/:API Wrapper\" \
  -e COMFYUI_ARGS=\"--disable-auto-launch --port 18188 --enable-cors-header\" \
+ -e COMFYUI_API_BASE=http://127.0.0.1:18188 \
  -e PROVISIONING_SCRIPT=$RAW/provisioning/bootstrap.sh \
- -e STACK_SPEC_URL=https://gist.githubusercontent.com/<user>/<id>/raw/spec.json \
- -e PYWORKER_REPO=https://github.com/vast-ai/pyworker.git -e PYWORKER_REF=main -e PYWORKER_WORKER=comfyui-json" \
-  --onstart-cmd "bash -c 'curl -fsSL $RAW/onstart/worker.sh -o /root/onstart.sh && bash /root/onstart.sh'" \
-  --disk_space 200 \
-  --search_params "num_gpus=1 gpu_ram>=32 disk_space>=200 inet_down>=400 verified=true reliability2>=0.95 geolocode in [<ALLOW_LIST>]"
+ -e STACK_SPEC_URL=$SPEC -e STACK_JOBS=3 \
+ -e PYWORKER_REPO=https://github.com/vast-ai/pyworker.git -e PYWORKER_REF=main -e BACKEND=comfyui-json" \
+  --onstart-cmd "entrypoint.sh" \
+  --search_params "num_gpus=1 gpu_ram>=32 disk_space>=200 inet_down>=400 verified=true"
 ```
+
+`geolocode` dan `reliability2` **tidak dikenali** di `search_params` template (beda sama
+`search offers`), jadi filter wilayah dipasang di **workergroup**.
 
 Endpoint + workergroup:
 ```bash
@@ -71,11 +81,22 @@ Peta ini harus dicek ulang kalau Vast menambah negara — `search offers` lalu c
 `geolocode` vs `geolocation`.
 
 ## Catatan yang bikin pusing kalau kelupaan
-- `PORTAL_CONFIG` wajib: kosong = ComfyUI & api-wrapper tidak start (`applications: {}` di `/etc/portal.yaml`).
+- **`PORTAL_CONFIG` wajib menyertakan `API Wrapper`.** Kalau tidak, `api-wrapper.sh` nge-grep
+  `/etc/portal.yaml`, nggak nemu, lalu **skip dirinya sendiri** secara senyap:
+  `Skipping api-wrapper startup (not in /etc/portal.yaml)`.
+- **`COMFYUI_API_BASE` wajib diarah ke 18188.** Default wrapper `127.0.0.1:8188` itu jalur caddy
+  yang balas **401** → probe backend gagal → token `BACKENDS_READY` tidak pernah tercetak →
+  PyWorker comfyui-json diam selamanya di `model_loading` dan `measured_perf` tetap 0.
+  Rantai readiness: PyWorker → api-wrapper:18288 → probe ComfyUI → `BACKENDS_READY` → benchmark.
+- **`--onstart-cmd` harus `entrypoint.sh`.** Mengisinya script sendiri = *menggantikan* entrypoint
+  image, akibatnya provisioning tidak pernah jalan (gejala: folder model kosong, service "RUNNING"
+  tapi tidak ada bobot).
+- `vastai update template` rapuh (400 kalau payload tidak lengkap; hash berubah tiap edit) →
+  lebih aman `create template` baru lalu `delete template --template-id <lama>`.
+- `vastai copy <id>:/berkas ./lokal` gagal di image ini (`rsync: Unknown module`) → pakai SSH.
 - `vastai set ssh-key` bisa nyimpen **string path**, bukan isi pubkey → SSH `Permission denied`.
   Cek `vastai show ssh-keys --raw`; benerin `vastai update ssh-key <id> "$(cat ~/.ssh/id_ed25519.pub)"`;
   instance lama tidak ikut key baru.
-- Image cek `SERVERLESS=true` (bukan `VAST_SERVERLESS`) - verifikasi saat smoke test.
 - `stop instance` tetap menagih storage → selalu `destroy`.
-- Bandingkan `inet_down_cost` antar host: 0.0026 vs 0.013 $/GB ≈ hemat $0.47 per worker boot.
+- Bandingkan `inet_down_cost` antar host: 0.0026 vs 0.013 $/GB ≈ beda $0.47 per worker boot.
 - Atribusi ke pemilik model tetap harus tampil di layanan (syarat lisensi), meskipun repo ini senyap.
