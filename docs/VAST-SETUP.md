@@ -28,12 +28,32 @@ vastai create template --name "vs-a1 stack" \
 
 Endpoint + workergroup:
 ```bash
+# hash template aktif: lihat `vastai search templates` / notes lokal (hash berubah tiap edit template)
+HASH=$(cut -d' ' -f2 /tmp/finaltpl.txt 2>/dev/null || echo <HASH>)
+
 vastai create endpoint --endpoint_name vs-a1 --min_load 0 --min_cold_load 0 \
-  --cold_workers 1 --max_workers 2 --target_util 0.9 --cold_mult 2.0 \
+  --cold_workers 1 --max_workers 1 --target_util 0.9 --cold_mult 2.0 \
   --max_queue_time 900 --target_queue_time 120 --inactivity_timeout 600
-vastai create workergroup --template_hash <HASH> --endpoint_name vs-a1 --gpu_ram 32 \
-  --search_params "<sama seperti di atas>"
+
+vastai create workergroup --template_hash $HASH --endpoint_name vs-a1 --gpu_ram 32 \
+  --search_params "num_gpus=1 gpu_name=RTX_5090 compute_cap>=890 disk_space>=250 inet_down>=500 \
+    verified=true cuda_max_good>=12.9 storage_cost<=0.2 \
+    geolocation in [JP,TW,TH,VN,HK,CN,ID,MY,IN,AE,SA,LK,AU,NZ,CA,MX,AR,CL,ZA,JO,SG]"
 ```
+
+### Kenapa tiap syarat itu ada (semua terukur 2026-09-08, pool = offer 5090 di allow-list)
+| syarat | tanpa | dengan | alasan |
+|---|---|---|---|
+| `storage_cost<=0.2` | 15 offer, idle 140GB $0.87–2.23/h | **12 offer, idle $0.83–0.93/h** | tarif storage beda 5–7× antar host |
+| `storage_cost<=0.15` | | 4 offer, idle $0.62/h | lebih hemat tapi **pool tipis** — risiko starve saat worker daur ulang |
+| `compute_cap>=890` | `gpu_ram>=32` meloloskan **Tesla V100 cc7** $0.173/j | | V100 nggak punya FP8/FP4; jalur music saja sudah mati karena CUDA |
+| `cuda_max_good>=12.9` | host CUDA 12.9 bikin ComfyUI `driver too old` | | dan **music** tetap butuh ≥13.0 |
+| `gpu_name=RTX_5090` | longgar → dapat kartu tak layak | 11–12 offer | satu-satunya kelas yang sudah terbukti ngejalanin H3 |
+
+`--disk_space` template sekarang **140 GB** (bobot 71.5 GB + output + slack). Ini yang menentukan biaya idle,
+bukan `disk_space>=250` di search_params (itu syarat kapasitas host, gratis).
+
+Perkiraan biaya idle cold worker sekarang: **±$0.85/hari** (sebelumnya $2.23).
 
 ## Filter wilayah (WAJIB - syarat lisensi model)
 Lisensi bobot mengecualikan **Uni Eropa, Inggris, Korea Selatan, AS** dari hosting/penjualan
