@@ -17,7 +17,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -82,12 +81,20 @@ def cost_of(s, capability, profile):
     return s["profiles"][profile or "t2va-544p"]["cost"]
 
 
-def loudnorm(src, dst):
-    """Batasin biar nggak clipping (temuan QC: peak 0.0 dBFS)."""
+def loudnorm(src, dst, muxed=False):
+    """Normalkan loudness (temuan QC: musik peak 0.0 dBFS, audio video mean -30 dB).
+
+    muxed=True -> file video: stream video disalin apa adanya, hanya audionya yang diolah.
+    Target -16 LUFS dengan true-peak -1.5 dBFS.
+    """
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src)]
+    if muxed:
+        cmd += ["-c:v", "copy", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
+    cmd.append(str(dst))
     try:
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
-                        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", str(dst)],
-                       check=True, timeout=120)
+        subprocess.run(cmd, check=True, timeout=300)
         return True
     except Exception:
         return False
@@ -129,12 +136,14 @@ def harvest(out, capability):
             saved.append({"filename": name, "error": "respons nggak berisi data/base64/url",
                           "keys": list(item.keys())})
             continue
-        if capability == "music":
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
-                tf.write(p.read_bytes())
-                tmp = Path(tf.name)
-            if loudnorm(tmp, p):
-                tmp.unlink(missing_ok=True)
+        if capability in ("music", "video"):
+            # tuker di tempat; kalau ffmpeg gagal, simpan versi mentah daripada kehilangan hasil
+            pre = p.with_name(p.stem + ".pre" + p.suffix)
+            p.replace(pre)
+            if loudnorm(pre, p, muxed=(capability == "video")):
+                pre.unlink(missing_ok=True)
+            else:
+                pre.replace(p)
         saved.append({"filename": name, "path": str(p), "bytes": p.stat().st_size})
     return saved
 
