@@ -28,31 +28,13 @@ python3 tools/stackctl.py --spec stack/spec.example.json --list
 python3 tools/stackctl.py --spec <spec> --profile <nama> --local http://127.0.0.1:18188
 ```
 
-## Jalankan
+## Aplikasi buat user
+Bukan di sini. Façade/API-nya ada di folder terpisah `~/Python/higgsgen-api`.
+Repo ini khusus sisi worker: provisioning, spec, dan perkakas CLI.
+
+## Perkakas
 ```bash
-cp .env.example .env      # isi VAST_API_KEY, STACK_API_KEY, STACK_ENDPOINT
-python3 app.py            # http://127.0.0.1:8090
+python3 tools/stackctl.py --spec <spec-url> --list
+python3 tools/probe_nodes.py --base http://127.0.0.1:18188 --spec <spec-url>
+python3 tools/localize_template.py --template <nama> --set k=v --drop LoraLoaderModelOnly --switch-off
 ```
-Atau docker: `docker build -t vs-a1-facade . && docker run --env-file .env -p 8090:8090 vs-a1-facade`
-
-```bash
-H=localhost:8090; TOK=<STACK_API_KEY>
-curl -s $H/health
-curl -s -H "Authorization: Bearer $TOK" $H/capabilities
-curl -s -XPOST $H/mode -H "Authorization: Bearer $TOK" -H 'content-type: application/json' \
-     -d '{"capability":"image","warm":true}'
-curl -s -XPOST $H/job   -H "Authorization: Bearer $TOK" -H 'content-type: application/json' \
-     -d '{"capability":"image","params":{"prompt":"a red bicycle by a white wall, noon, no text"}}'
-```
-Rute: `POST /job` (satu-satunya pintu kerja) · `POST/GET /mode` · `GET /capabilities` ·
-`GET /job/{id}` · `GET /health` (tanpa token, liveness). Semua berbayar butuh bearer token;
-kalau `STACK_API_KEY` kosong auth mati - hanya boleh localhost. Dibuka ke jaringan wajib TLS.
-
-### Angka terukur (1x RTX 5090; worker ter-park lalu dibangunkan)
-| kapabilitas | bangun/ganti mode | job | keluaran |
-|---|---|---|---|
-| image | 50.7 s | 10.9 s | PNG 16:9 1 MP |
-| music | 25.3 s (swap) | 21.1 s | FLAC, loudness sudah normal |
-| video | 78.2 s (swap) | 62.4 s | MP4 960x544 5.2 dtk + audio |
-
-Build terverifikasi: image 761 MB, container jalan, auth 401/200 sesuai.
