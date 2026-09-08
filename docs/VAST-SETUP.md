@@ -1,15 +1,20 @@
 # Setup Vast
 
-Config yang **sudah terbukti jalan** per 2026-09-07 (template dibuat baru tiap perubahan,
+Config yang **sudah terbukti jalan** per 2026-09-08 (template dibuat baru tiap perubahan,
 bukan di-edit - lihat Catatan):
+
+```
+template aktif : id 704286  hash 333c488a608d26b7bc664268c65fa7a7  disk reservasi 100 GB
+endpoint aktif : 36613 vs-a1 (persisten, jangan dihapus)
+```
 
 ```bash
 RAW=https://raw.githubusercontent.com/zakie0161/aken/main
 SPEC=https://huggingface.co/zakie0161/cfg-9f3a/resolve/main/spec.json
 
 vastai create template --name "vs-a1 stack" \
-  --image vastai/comfy --image_tag v0.34.0-cuda-13.2-py312 \
-  --ssh --direct --disk_space 200 \
+  --image vastai/comfy --image_tag @vastai-automatic-tag \
+  --ssh --direct --disk_space 100 \
   --env "-p 1111:1111 -p 8188:8188 -p 18188:18188 -p 18288:18288 \
  -e OPEN_BUTTON_PORT=1111 -e OPEN_BUTTON_TOKEN=1 \
  -e DATA_DIRECTORY=/workspace/ -e JUPYTER_DIR=/ \
@@ -17,10 +22,10 @@ vastai create template --name "vs-a1 stack" \
  -e COMFYUI_ARGS=\"--disable-auto-launch --port 18188 --enable-cors-header\" \
  -e COMFYUI_API_BASE=http://127.0.0.1:18188 \
  -e PROVISIONING_SCRIPT=$RAW/provisioning/bootstrap.sh \
- -e STACK_SPEC_URL=$SPEC -e STACK_JOBS=3 \
+ -e STACK_SPEC_URL=$SPEC -e STACK_JOBS=4 \
  -e PYWORKER_REPO=https://github.com/vast-ai/pyworker.git -e PYWORKER_REF=main -e BACKEND=comfyui-json" \
   --onstart-cmd "entrypoint.sh" \
-  --search_params "num_gpus=1 gpu_ram>=32 disk_space>=200 inet_down>=400 verified=true"
+  --search_params "num_gpus=1 gpu_ram>=32 disk_space>=110 cpu_ram>=48 disk_bw>=1200 storage_cost<=0.20 inet_down>=500 verified=true cuda_max_good>=13.0 geolocation in [JP,TW,TH,VN,HK,CN,ID,MY,IN,AE,SA,LK,AU,NZ,CA,MX,AR,CL,ZA,JO,SG]"
 ```
 
 `geolocode` dan `reliability2` **tidak dikenali** di `search_params` template (beda sama
@@ -38,29 +43,64 @@ vastai create endpoint --endpoint_name vs-a1 --min_load 0 --min_cold_load 0 \
   --max_queue_time 900 --target_queue_time 120 --inactivity_timeout 600
 
 vastai create workergroup --template_hash $HASH --endpoint_name vs-a1 --gpu_ram 32 \
-  --search_params "num_gpus=1 gpu_name=RTX_5090 compute_cap>=890 disk_space>=250 inet_down>=500 \
-    verified=true cuda_max_good>=13.0 storage_cost<=0.10 \
+  --search_params "num_gpus=1 gpu_name=RTX_5090 compute_cap>=890 disk_space>=110 cpu_ram>=48 \
+    disk_bw>=1200 storage_cost<=0.20 inet_down>=500 verified=true cuda_max_good>=13.0 \
     geolocation in [JP,TW,TH,VN,HK,CN,ID,MY,IN,AE,SA,LK,AU,NZ,CA,MX,AR,CL,ZA,JO,SG]"
 ```
 
 ### Kenapa tiap syarat itu ada (semua terukur 2026-09-08, pool = offer 5090 di allow-list)
 | syarat | tanpa | dengan | alasan |
 |---|---|---|---|
-| `storage_cost<=0.10` | 20 offer, idle 140GB $0.62–4.65/h | **2 offer, idle $0.031–0.311/h** | tarif storage beda sampai **30×** antar host |
-| `storage_cost<=0.06` | | 1 offer, idle $0.031/h | terlalu tipis: satu host = satu titik gagal |
+| `storage_cost<=0.20` | 17 offer, median $0.47/h | **9 offer**, termurah $0.41/h | tarif storage beda sampai **5×** antar host |
+| `storage_cost<=0.10` | | **0 offer (2026-09-08)** | pernah dipakai di template — query ini yang bikin worker **tidak bisa terekrut sama sekali** (1 offer kalau filter wilayah dilepas). Jangan diulang. |
 | `compute_cap>=890` | `gpu_ram>=32` meloloskan **Tesla V100 cc7** $0.173/j | | V100 nggak punya FP8/FP4; jalur music saja sudah mati karena CUDA |
 | `cuda_max_good>=12.9` | host CUDA 12.9 bikin ComfyUI `driver too old` | | dan **music** tetap butuh ≥13.0 |
-| `gpu_name=RTX_5090` | longgar → dapat kartu tak layak | 11–12 offer | satu-satunya kelas yang sudah terbukti ngejalanin H3 |
+| `gpu_name=RTX_5090` | longgar → dapat kartu tak layak | 11–12 offer | satu-satunya kelas yang terbukti memuat bobot terbesar di spec |
 
-`--disk_space` template sekarang **140 GB** (bobot 71.5 GB + output + slack). Ini yang menentukan biaya idle,
-bukan `disk_space>=250` di search_params (itu syarat kapasitas host, gratis).
+`--disk_space` template sekarang **100 GB** (sebelumnya 140). Yang ditagih Vast adalah **disk yang dicadangkan**
+(`--disk_space`), bukan pemakaian nyata; `disk_space>=110` di search_params cuma syarat kapasitas host.
+Simpanan dari 140→100 GB: ±$0.011/jam worker hidup ($0.20/GB/bln).
 
-Perkiraan biaya idle cold worker sekarang: **±$0.85/hari** (sebelumnya $2.23).
+### Berapa besar storage sebenarnya (terukur 2026-09-08, pool 5090 dalam allow-list)
+| reservasi | tarif storage median | per jam worker | per hari (24 j)
+|---|---|---|---|
+| 140 GB | $0.33/GB/bln | $0.051 | $1.53 |
+| **100 GB (aktif)** | $0.28/GB/bln | $0.028 | $0.83 |
+| 40 GB (bobot image saja) | $0.20/GB/bln | $0.011 | $0.32 |
+
+`dph_total` median pool ini **$0.47/jam** → jadi storage itu **±6%** dari biaya worker. Output generasi
+(1,6–6 MB) dihapus atau tidak di worker = tidak terasa secara uang; yang membuat disk penuh itu
+*bobot*, dan bobot tidak tinggal permanen di Vast (volume & snapshot tidak tersedia untuk kita —
+lihat notes/STORAGE.md). Setiap cold start men-download lagi dari nol.
+
+Ukuran bobot per kapabilitas (spec 12 file / 71,5 GB):
+
+| kapabilitas | bobot | cukup disk |
+|---|---|---|
+| video | 46,4 GB | ~71 GB |
+| image | 13,2 GB | ~38 GB |
+| music | 11,9 GB | ~36 GB |
+| **semua (sekarang)** | **71,5 GB** | 100 GB |
+
+Kalau worker hanya menarik bobot kapabilitas aktif (butuh `STACK_ONLY` di `provisioning/bootstrap.sh`),
+disk bisa turun ke ~40 GB **dan** cold wake jauh lebih cepat — 13 GB vs 71,5 GB unduhan.
 
 ## Filter wilayah (WAJIB - syarat lisensi model)
 Lisensi bobot mengecualikan **Uni Eropa, Inggris, Korea Selatan, AS** dari hosting/penjualan
 bobot maupun output. Autoscaler Vast merekrut host dari pasar global, jadi wilayah harus
 disaring di `search_params`.
+
+### ⚠️ Satuan field di `search_params` (jebakan, terukur 2026-09-08)
+`cpu_ram` dan `gpu_ram` di **query** bersatuan **GB**, tapi di **output JSON** `search offers` keduanya
+bersatuan **MB**. Jadi `cpu_ram>=32000` = "butuh 32 000 GB" → **0 hasil**, sementara `x['cpu_ram']`
+menampilkan `64475` (= 64 GB). Yang benar: `cpu_ram>=48`. Field `disk_bw` (MB/s) baru ada di output,
+dan sebagai filter query ia diterima.
+
+Cara memeriksa funnel sebelum memasang query di workergroup (satu calls, hitung lokal):
+```bash
+vastai search offers "num_gpus=1 gpu_name=RTX_5090 compute_cap>=890 geolocation in [JP,TW,TH,VN,HK,CN,ID,MY,IN,AE,SA,LK,AU,NZ,CA,MX,AR,CL,ZA,JO,SG]" --raw \
+  | python3 -c "import json,sys;o=json.load(sys.stdin);print(len(o),'offer | dph',sorted(x['dph_total'] for x in o)[:3])"
+```
 
 Yang **tidak** berfungsi di `search offers`: `geolocation='Japan, JP'` / `Japan_JP` (0 hasil).
 Yang berfungsi di `search offers`: `geolocode in [ ... ]` (integer per negara — peta di bawah).

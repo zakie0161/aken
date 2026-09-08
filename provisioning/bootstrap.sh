@@ -71,16 +71,59 @@ install_pyworker() {
 main() {
   echo "$LOG mulai; workspace=$WS"
   fetch_spec
-  # daftar file: "repo|rev|path|subdir|size" per baris, keluaran dari parser spec
-  local list
-  list=$($PY - "$SPEC" <<'PY'
-import json,sys
-s=json.load(open(sys.argv[1]))
-base=s["base_url"] if "base_url" in s else "https://huggingface.co"
-for f in s["files"]:
-    print("|".join([f["repo"], f["rev"], f["path"], f["subdir"], str(f.get("size",0))]))
+  # Satu jalan: petakan kapabilitas -> file bobot, murni dari spec (capabilities/profiles/components).
+  # STACK_ONLY=<kapabilitas> -> worker hanya unduh bobot kapabilitas itu + pakai benchmark ringan.
+  # Tanpa itu: semua file + benchmark bawaan spec (perilaku lama).
+  local listfile="$WS/stack-files.list"
+  rm -f "$listfile"
+  $PY - "$SPEC" "${STACK_ONLY:-}" "$WORK" "$listfile" <<'PY' || die "gagal memproses spec"
+import json, os, re, sys
+spec, only, work, listfile = (json.load(open(sys.argv[1])), (sys.argv[2] or "").strip().lower(),
+                              sys.argv[3], sys.argv[4])
+WEIGHT = re.compile(r"([A-Za-z0-9_.\-]+\.(?:safetensors|ckpt|pt|pth|bin|onnx|gguf|ggml))")
+names = lambda o: set(WEIGHT.findall(json.dumps(o)))
+caps, profs = spec.get("capabilities") or {}, spec.get("profiles") or {}
+need = {}
+for cap, cfg in caps.items():
+    s = set()
+    for p in (cfg.get("profiles") or []):
+        if p in profs: s |= names(profs[p])
+    comp = (spec.get("components") or {}).get(cap)
+    if comp: s |= names(comp)
+    need[cap.lower()] = s
+allrefs = set().union(*need.values()) if need else set()
+
+files = spec.get("files") or []
+if only and only not in need:
+    print(f"[stack] [ERROR] STACK_ONLY={only} bukan kapabilitas spec {sorted(need)}", file=sys.stderr)
+    sys.exit(1)
+
+keep, skipped = [], 0
+for f in files:
+    b = f["path"].rsplit("/", 1)[-1]
+    if only and b not in need[only] and b in allrefs:
+        skipped += 1
+        continue
+    keep.append(f)
+with open(listfile, "w") as fh:
+    for f in keep:
+        fh.write("|".join([f["repo"], f["rev"], f["path"], f["subdir"], str(f.get("size", 0))]) + "\n")
+gb = sum(int(f.get("size", 0)) for f in keep) / 1e9
+print(f"[stack] unduh {len(keep)}/{len(files)} file = {gb:.1f} GB" + (f" (STACK_ONLY={only}, lewati {skipped})" if only else ""))
+
+os.makedirs(work, exist_ok=True)
+profiles = {k: v for k, v in profs.items() if not only or str(v.get("capability", "")).lower() == only}
+bench = spec.get("benchmark")
+if only and profiles:
+    pick = sorted(profiles.items(), key=lambda kv: (kv[1].get("cost") or 0, kv[0]))[0]
+    bench = pick[1].get("graph")
+    print(f"[stack] benchmark ringan: profil {pick[0]} (cost {pick[1].get('cost')}) bukan graph bawaan spec")
+missing = (names(bench) - {f["path"].rsplit("/", 1)[-1] for f in keep}) if bench else set()
+if missing: print(f"[stack] [WARN] graph benchmark menyebut file yang tidak diunduh: {sorted(missing)}", file=sys.stderr)
+if bench: open(f"{work}/benchmark.json", "w").write(json.dumps(bench, indent=1))
+if profiles: open(f"{work}/profiles.json", "w").write(json.dumps(profiles, indent=1))
 PY
-) || die "spec tidak punya field files[]"
+
 
   local n=0
   while IFS='|' read -r repo rev path sub want; do
@@ -88,26 +131,16 @@ PY
     dl "$repo" "$rev" "$path" "$MODELS/$sub" "$want" &
     n=$((n+1))
     while [[ "$(jobs -rp | wc -l)" -ge "$JOBS" ]]; do wait -n; done
-  done <<< "$list"
+  done < "$listfile"
   wait || die "ada file yang gagal ($n item)"
-
-  # graph benchmark + profil kerja -> dipakai PyWorker & client
-  $PY - "$SPEC" "$WORK" <<'PY'
-import json,sys,os
-spec,ws=json.load(open(sys.argv[1])),sys.argv[2]
-os.makedirs(ws,exist_ok=True)
-for key,name in (("benchmark","benchmark.json"),("profiles","profiles.json")):
-    if key in spec:
-        open(f"{ws}/{name}","w").write(json.dumps(spec[key],indent=1))
-        print(f"[stack] tulis {name}")
-PY
 
   install_pyworker
 
-  # cron pembersih output lama
+  # cron pembersih output: worker hidup sampai inactivity_timeout setelah request terakhir,
+  # jadi output cukup bertahan sebentar - hasil sudah dipanen higgsgen-api sebagai base64.
   if ! crontab -l 2>/dev/null | grep -qF 'stack-clean'; then
     ( crontab -l 2>/dev/null; echo "# stack-clean"; \
-      echo '*/15 * * * * find '"$COMFYUI_DIR"'/output -type f -mmin +1440 -delete' ) | crontab -
+      echo '*/5 * * * * find '"$COMFYUI_DIR"'/output -type f -mmin +20 -delete; find '"$COMFYUI_DIR"'/temp -type f -mmin +20 -delete' ) | crontab -
   fi
   echo "$LOG selesai"; du -sh "$MODELS"/* 2>/dev/null | sed "s/^/$LOG   /"
 }
