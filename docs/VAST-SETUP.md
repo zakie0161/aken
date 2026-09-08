@@ -26,6 +26,8 @@ vastai create template --name "vs-a1 stack" \
 `geolocode` dan `reliability2` **tidak dikenali** di `search_params` template (beda sama
 `search offers`), jadi filter wilayah dipasang di **workergroup**.
 
+`storage_cost` (USD/GB/bulan) **bisa** dan wajib dipakai: bedanya 30x biaya idle. Lihat tabel di notes/STORAGE.md.
+
 Endpoint + workergroup:
 ```bash
 # hash template aktif: lihat `vastai search templates` / notes lokal (hash berubah tiap edit template)
@@ -37,7 +39,7 @@ vastai create endpoint --endpoint_name vs-a1 --min_load 0 --min_cold_load 0 \
 
 vastai create workergroup --template_hash $HASH --endpoint_name vs-a1 --gpu_ram 32 \
   --search_params "num_gpus=1 gpu_name=RTX_5090 compute_cap>=890 disk_space>=250 inet_down>=500 \
-    verified=true cuda_max_good>=12.9 storage_cost<=0.2 \
+    verified=true cuda_max_good>=13.0 storage_cost<=0.10 \
     geolocation in [JP,TW,TH,VN,HK,CN,ID,MY,IN,AE,SA,LK,AU,NZ,CA,MX,AR,CL,ZA,JO,SG]"
 ```
 
