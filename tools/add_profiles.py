@@ -11,14 +11,9 @@ import json
 import subprocess
 from pathlib import Path
 
+# Nama file bobot TIDAK ada di repo ini - semuanya dibaca dari `components` di spec
+# (spec di-host di URL yang tidak bisa ditebak; lihat notes lokal).
 SPEC = Path(__file__).resolve().parent.parent / "stack" / "spec.local.json"
-
-KREA_UNET = "krea2_turbo_nvfp4.safetensors"
-KREA_CLIP = "qwen3vl_4b_fp8_scaled.safetensors"
-KREA_VAE = "qwen_image_vae.safetensors"
-MUS_UNET = "minimax_music3_dit_int8_convrot.safetensors"
-MUS_CLIP = "minimax_music3_text_encoder_pruned_int8_convrot.safetensors"
-MUS_VAE = "minimax_music3_dav.safetensors"
 
 
 def canvas(aspect, megapixels, multiple=32):
@@ -31,12 +26,12 @@ def canvas(aspect, megapixels, multiple=32):
     return int(snap(w)), int(snap(h))
 
 
-def krea_graph(prompt, aspect="16:9", megapixels=1.0, seed=0, steps=8):
+def krea_graph(comp, prompt, aspect="16:9", megapixels=1.0, seed=0, steps=8):
     w, h = canvas(aspect, megapixels)
     return {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": KREA_UNET, "weight_dtype": "default"}},
-        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": KREA_CLIP, "type": "krea2", "device": "default"}},
-        "3": {"class_type": "VAELoader", "inputs": {"vae_name": KREA_VAE}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": comp["unet"], "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": comp["clip"], "type": comp["clip_type"], "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": comp["vae"]}},
         "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
         "5": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["4", 0]}},
         "6": {"class_type": "EmptyLatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}},
@@ -49,11 +44,11 @@ def krea_graph(prompt, aspect="16:9", megapixels=1.0, seed=0, steps=8):
     }
 
 
-def music_graph(caption, lyrics, seconds=12.0, seed=0, steps=30, cfg=1.7, top_k=50):
+def music_graph(comp, caption, lyrics, seconds=12.0, seed=0, steps=30, cfg=1.7, top_k=50):
     return {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MUS_UNET, "weight_dtype": "default"}},
-        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": MUS_CLIP, "type": "minimax", "device": "default"}},
-        "3": {"class_type": "VAELoader", "inputs": {"vae_name": MUS_VAE}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": comp["unet"], "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": comp["clip"], "type": comp["clip_type"], "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": comp["vae"]}},
         "4": {"class_type": "MiniMaxMusic3TextEncode", "inputs": {
             "clip": ["2", 0], "caption": caption, "lyrics": lyrics, "seed": seed,
             "max_duration": float(seconds), "cfg_scale": cfg, "top_k": top_k}},
@@ -76,11 +71,12 @@ def main():
     ap.add_argument("--upload", action="store_true")
     a = ap.parse_args()
     spec = json.loads(SPEC.read_text())
+    comp = spec["components"]
 
     spec["profiles"]["image-t2i"] = {
         "label": "text->image 16:9 1MP 8-step",
         "capability": "image",
-        "graph": krea_graph("<prompt>"),
+        "graph": krea_graph(comp["image"], "<prompt>"),
         "cost": 25,
         "output_kind": "image",
         "params": {"prompt": "<prompt>", "aspect": "16:9", "megapixels": 1.0},
@@ -88,7 +84,7 @@ def main():
     spec["profiles"]["music-t2m"] = {
         "label": "text->music 12s 30-step",
         "capability": "music",
-        "graph": music_graph("<caption>", "<lyrics>"),
+        "graph": music_graph(comp["music"], "<caption>", "<lyrics>"),
         "cost": 40,
         "output_kind": "audio",
         "params": {"caption": "<caption>", "lyrics": "<lyrics>", "seconds": 12.0},

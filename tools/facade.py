@@ -45,11 +45,13 @@ def spec():
 def build_graph(s, capability, profile, params):
     """Graph API-format + substitusi parameter, per kapabilitas."""
     if capability == "image":
-        return krea_graph(params.get("prompt", ""), params.get("aspect", "16:9"),
+        c = s["components"]["image"]
+        return krea_graph(c, params.get("prompt", ""), params.get("aspect", "16:9"),
                           float(params.get("megapixels", 1.0)), int(params.get("seed", 0)),
                           int(params.get("steps", 8)))
     if capability == "music":
-        return music_graph(params.get("caption", ""), params.get("lyrics", ""),
+        c = s["components"]["music"]
+        return music_graph(c, params.get("caption", ""), params.get("lyrics", ""),
                            float(params.get("seconds", 12)), int(params.get("seed", 0)),
                            int(params.get("steps", 30)), float(params.get("cfg", 1.7)))
     name = profile or "t2va-544p"
