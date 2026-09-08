@@ -21,13 +21,25 @@ import time
 import urllib.request
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 SPEC_URL = os.environ.get("STACK_SPEC_URL", "https://huggingface.co/zakie0161/cfg-9f3a/resolve/main/spec.json")
 ENDPOINT = os.environ.get("STACK_ENDPOINT", "vs-a1")
 OUT_DIR = Path(os.environ.get("STACK_OUT", str(Path.home() / "stack-out")))
+# Kalau kosong, auth DIMATIKAN (cuma buat development di localhost!).
+API_KEY = os.environ.get("STACK_API_KEY", "").strip()
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def require_auth(authorization: str = Header(default="")):
+    """Semua endpoint berbayar dikunci bearer token - kalau tidak, siapa pun yang bisa
+    mencapai port ini bisa membakar credit Vast-mu."""
+    if not API_KEY:
+        return
+    tok = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    if tok != API_KEY:
+        raise HTTPException(401, "token salah/kosong - kirim 'Authorization: Bearer <STACK_API_KEY>'")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from add_profiles import t2i_graph, t2m_graph  # noqa: E402  (satu sumber kebenaran graph)
@@ -161,10 +173,11 @@ class Mode(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"mode": _state["mode"], "busy": _state["busy"], "endpoint": ENDPOINT, "out": str(OUT_DIR)}
+    return {"ok": True, "mode": _state["mode"], "busy": _state["busy"], "endpoint": ENDPOINT,
+            "auth": bool(API_KEY)}
 
 
-@app.get("/capabilities")
+@app.get("/capabilities", dependencies=[Depends(require_auth)])
 async def capabilities():
     s = spec()
     return {"capabilities": s.get("capabilities"),
@@ -172,7 +185,7 @@ async def capabilities():
                          for k, v in s["profiles"].items()}}
 
 
-@app.post("/mode")
+@app.post("/mode", dependencies=[Depends(require_auth)])
 async def set_mode(m: Mode):
     if m.capability not in ("video", "image", "music"):
         raise HTTPException(400, "capability harus video|image|music")
@@ -191,12 +204,12 @@ async def set_mode(m: Mode):
         return {"mode": m.capability, "warmup": warm}
 
 
-@app.get("/mode")
+@app.get("/mode", dependencies=[Depends(require_auth)])
 async def get_mode():
     return {"mode": _state["mode"]}
 
 
-@app.post("/job")
+@app.post("/job", dependencies=[Depends(require_auth)])
 async def job(j: Job):
     if j.capability not in ("video", "image", "music"):
         raise HTTPException(400, "capability harus video|image|music")
@@ -225,6 +238,6 @@ async def job(j: Job):
         _state["busy"] = False
 
 
-@app.get("/job/{jid}")
+@app.get("/job/{jid}", dependencies=[Depends(require_auth)])
 async def get_job(jid: str):
     return _state["jobs"].get(jid) or {"error": "tidak ada job dengan id itu"}

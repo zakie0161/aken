@@ -28,14 +28,37 @@ python3 tools/stackctl.py --spec stack/spec.example.json --list
 python3 tools/stackctl.py --spec <spec> --profile <nama> --local http://127.0.0.1:18188
 ```
 
-## Façade lokal (satu titik masuk, satu kapabilitas aktif)
+## Façade: satu titik masuk, satu kapabilitas aktif
 ```bash
-pip install -r requirements.txt
-cd tools && uvicorn facade:app --port 8090
-curl -s localhost:8090/capabilities
-curl -s -XPOST localhost:8090/mode -d '{"capability":"image","warm":true}' -H 'content-type: application/json'
-curl -s -XPOST localhost:8090/job   -d '{"capability":"image","params":{"prompt":"...","aspect":"16:9"}}' -H 'content-type: application/json'
+openssl rand -hex 16                     # token sendiri, jangan pakai contoh
+
+docker build -t vs-a1-facade .
+docker run -d --name vs-a1-facade -p 8090:8090 \
+  -e STACK_API_KEY=<token> -e VAST_API_KEY=<key-vast> -e STACK_ENDPOINT=vs-a1 \
+  -v $HOME/stack-out:/root/stack-out vs-a1-facade
 ```
-`POST /job {capability: video|image|music}` — satu-satunya titik masuk. Mutex mode ada di façade,
-jadi **sisi server wajib `max_workers=1`** kalau tidak, dua worker bisa memegang model berbeda.
-Output audio dilewatkan `loudnorm` (temuan QC: peak mentok 0 dBFS).
+Tanpa `STACK_API_KEY`, auth **mati** - hanya boleh untuk localhost.
+
+```bash
+H=localhost:8090; TOK=<token>
+curl -s $H/health
+curl -s -H "Authorization: Bearer $TOK" $H/capabilities
+curl -s -XPOST $H/mode -H "Authorization: Bearer $TOK" -H 'content-type: application/json' \
+     -d '{"capability":"image","warm":true}'
+curl -s -XPOST $H/job   -H "Authorization: Bearer $TOK" -H 'content-type: application/json' \
+     -d '{"capability":"image","params":{"prompt":"a red bicycle by a white wall, noon, no text"}}'
+```
+Rute: `POST /job` (satu-satunya pintu kerja), `POST/GET /mode`, `GET /capabilities`,
+`GET /job/{id}`, `GET /health` (tanpa token, liveness). Semua yang berbayar butuh bearer token.
+
+Kalau dibuka ke jaringan: wajib di belakang reverse proxy + TLS (caddy/nginx).
+`VAST_API_KEY` hanya lewat env, tidak pernah ke-commit.
+
+### Angka terukur (1x RTX 5090; worker ter-park lalu dibangunkan)
+| kapabilitas | bangun/ganti mode | job | keluaran |
+|---|---|---|---|
+| image | 50.7 s | 10.9 s | PNG 16:9 1 MP |
+| music | 25.3 s (swap) | 21.1 s | FLAC, loudness sudah normal |
+| video | 78.2 s (swap) | 62.4 s | MP4 960x544 5.2 dtk + audio |
+
+Build terverifikasi: image 761 MB, container jalan, auth 401/200 sesuai.
