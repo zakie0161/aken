@@ -31,7 +31,7 @@ OUT_DIR = Path(os.environ.get("STACK_OUT", str(Path.home() / "stack-out")))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from add_profiles import krea_graph, music_graph  # noqa: E402  (satu sumber kebenaran graph)
+from add_profiles import t2i_graph, t2m_graph  # noqa: E402  (satu sumber kebenaran graph)
 
 app = FastAPI(title="vs-a1 facade")
 _state = {"mode": None, "lock": asyncio.Lock(), "busy": False, "jobs": {}}
@@ -46,31 +46,32 @@ def build_graph(s, capability, profile, params):
     """Graph API-format + substitusi parameter, per kapabilitas."""
     if capability == "image":
         c = s["components"]["image"]
-        return krea_graph(c, params.get("prompt", ""), params.get("aspect", "16:9"),
+        return t2i_graph(c, params.get("prompt", ""), params.get("aspect", "16:9"),
                           float(params.get("megapixels", 1.0)), int(params.get("seed", 0)),
                           int(params.get("steps", 8)))
     if capability == "music":
         c = s["components"]["music"]
-        return music_graph(c, params.get("caption", ""), params.get("lyrics", ""),
+        return t2m_graph(c, params.get("caption", ""), params.get("lyrics", ""),
                            float(params.get("seconds", 12)), int(params.get("seed", 0)),
                            int(params.get("steps", 30)), float(params.get("cfg", 1.7)))
     name = profile or "t2va-544p"
+    vn = s["components"]["video"]
     g = json.loads(json.dumps(s["profiles"][name]["graph"]))
     for v in g.values():
         ct, i = v.get("class_type"), v.get("inputs", {})
-        if ct == "MiniMaxH3ImageToVideo":
+        if ct == vn["image_node"]:
             i["prompt"] = params.get("prompt", i.get("prompt"))
             for k in ("width", "height", "length"):
                 if k in params:
                     i[k] = int(params[k])
-        elif ct == "LoraLoaderModelOnly" and params.get("lora"):
+        elif ct == vn["lora_node"] and params.get("lora"):
             i["lora_name"] = params["lora"]
-        elif ct == "MiniMaxH3SigmaShift" and params.get("shift"):
+        elif ct == vn["shift_node"] and params.get("shift"):
             sv, sa = params["shift"].split("/")
             i["shift_video"], i["shift_audio"] = float(sv), float(sa)
-        elif ct == "BasicScheduler" and params.get("steps"):
+        elif ct == vn["sched_node"] and params.get("steps"):
             i["steps"] = int(params["steps"])
-        elif ct == "RandomNoise" and params.get("seed") is not None:
+        elif ct == vn["noise_node"] and params.get("seed") is not None:
             i["noise_seed"] = int(params["seed"])
     return g
 
@@ -112,6 +113,12 @@ def harvest(out, capability):
     for item in (out.get("output") or []):
         blob = item.get("data") or item.get("base64") or item.get("b64")
         name = item.get("filename") or f"{capability}_{int(time.time())}"
+        # wrapper mengirim base64 di "data" + "mimetype"; pastikan ekstensi cocok
+        mime = (item.get("mimetype") or "").lower()
+        if blob and "." not in name:
+            ext = {"image/png": ".png", "image/jpeg": ".jpg", "audio/flac": ".flac",
+                   "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "video/mp4": ".mp4"}.get(mime, "")
+            name += ext
         p = OUT_DIR / name
         if blob:
             p.write_bytes(base64.b64decode(blob))

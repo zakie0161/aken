@@ -13,9 +13,11 @@ Hasilnya dicetak ke stdout sebagai JSON graph API, siap masuk spec.profiles.
 import argparse
 import json
 import sys
+import os
 import urllib.request
 
-REPO = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/{}.json"
+REPO = os.environ.get("STACK_TEMPLATE_REPO",
+       "https://raw.githubusercontent.com/{owner}/{repo}/main/templates/{{}}.json")
 
 
 def main():
