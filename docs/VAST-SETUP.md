@@ -31,7 +31,9 @@ vastai create template --name "vs-a1 stack" \
 `geolocode` dan `reliability2` **tidak dikenali** di `search_params` template (beda sama
 `search offers`), jadi filter wilayah dipasang di **workergroup**.
 
-`storage_cost` (USD/GB/bulan) **bisa** dan wajib dipakai: bedanya 30x biaya idle. Lihat tabel di notes/STORAGE.md.
+`storage_cost` (USD/GB/bulan) **bisa** dan sebaiknya dipakai: ia mengubah tarif penyimpanan yang
+dicadangkan worker. Tapi jangan tertipu — bagian terbesar biaya idle itu **GPU-nya**, bukan storage:
+lihat tabel "Biaya idle sungguhnya" di bawah.
 
 Endpoint + workergroup:
 ```bash
@@ -82,8 +84,30 @@ Ukuran bobot per kapabilitas (spec 12 file / 71,5 GB):
 | music | 11,9 GB | ~36 GB |
 | **semua (sekarang)** | **71,5 GB** | 100 GB |
 
-Kalau worker hanya menarik bobot kapabilitas aktif (butuh `STACK_ONLY` di `provisioning/bootstrap.sh`),
-disk bisa turun ke ~40 GB **dan** cold wake jauh lebih cepat — 13 GB vs 71,5 GB unduhan.
+Kalau worker hanya menarik bobot kapabilitas aktif (`STACK_ONLY` di `provisioning/bootstrap.sh` —
+sudah dipasang), disk bisa turun ke ~40 GB **dan** cold wake jauh lebih cepat: 13 GB vs 71,5 GB unduhan.
+
+### Biaya idle yang sungguhnya (terukur 2026-09-08, kredit dibaca tiap 30 detik)
+| kondisi worker | tagihan nyata | sebab |
+|---|---|---|
+| `idle` dengan `cold_workers=1` | **$0.507/jam = $12/hari** | GPU + disk dicadangkan, worker hidup terus |
+| `stopped`, bobot masih di disk (`cold_workers=0`) | **$0.024/jam = $0.57/hari** | hanya reservasi storage 100 GB yang tertagih; wake ±90 detik |
+| workergroup dihapus | **$0** | endpoint tetap ada; pakai lagi = provisioning ±22 menit |
+
+`cold_workers=1` pada dasarnya **menyewa satu RTX 5090 permanen**. Untuk pemakaian pribadi yang
+tidak terus-menerus, biarkan `cold_workers=0`: worker padam sendiri ±70 detik setelah sepi, dan
+request berikutnya bangun ±90 detik (bobot belum dibuang). Kalau ditinggal bermalam dan tidak
+akan dipakai, hapus workergroup-nya supaya jadi $0:
+
+```bash
+vastai delete workergroup <ID>                       # $0/jam, endpoint 36613 tetap utuh
+vastai create workergroup --template_hash $(cut -d' ' -f2 /tmp/finaltpl.txt) \
+  --endpoint_name vs-a1 --gpu_ram 32                 # hidupkan lagi saat mau dipakai
+```
+
+Karena provisioning penuh bisa 22 menit, `max_queue_time` dinaikkan ke **1800** agar request
+pertama tidak dianggap antrian basi — `HIGGSGEN_JOB_TIMEOUT` (API) dan timeout polling FE ikut
+naik ke 1800 s / 30 menit.
 
 ## Filter wilayah (WAJIB - syarat lisensi model)
 Lisensi bobot mengecualikan **Uni Eropa, Inggris, Korea Selatan, AS** dari hosting/penjualan
