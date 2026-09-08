@@ -46,8 +46,8 @@ vastai create workergroup --template_hash $HASH --endpoint_name vs-a1 --gpu_ram 
 ### Kenapa tiap syarat itu ada (semua terukur 2026-09-08, pool = offer 5090 di allow-list)
 | syarat | tanpa | dengan | alasan |
 |---|---|---|---|
-| `storage_cost<=0.2` | 15 offer, idle 140GB $0.87–2.23/h | **12 offer, idle $0.83–0.93/h** | tarif storage beda 5–7× antar host |
-| `storage_cost<=0.15` | | 4 offer, idle $0.62/h | lebih hemat tapi **pool tipis** — risiko starve saat worker daur ulang |
+| `storage_cost<=0.10` | 20 offer, idle 140GB $0.62–4.65/h | **2 offer, idle $0.031–0.311/h** | tarif storage beda sampai **30×** antar host |
+| `storage_cost<=0.06` | | 1 offer, idle $0.031/h | terlalu tipis: satu host = satu titik gagal |
 | `compute_cap>=890` | `gpu_ram>=32` meloloskan **Tesla V100 cc7** $0.173/j | | V100 nggak punya FP8/FP4; jalur music saja sudah mati karena CUDA |
 | `cuda_max_good>=12.9` | host CUDA 12.9 bikin ComfyUI `driver too old` | | dan **music** tetap butuh ≥13.0 |
 | `gpu_name=RTX_5090` | longgar → dapat kartu tak layak | 11–12 offer | satu-satunya kelas yang sudah terbukti ngejalanin H3 |
