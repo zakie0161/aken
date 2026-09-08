@@ -1,0 +1,212 @@
+"""Façade lokal buat stack serverless: SATU titik masuk, satu kapabilitas aktif.
+
+  POST /job        {"capability":"image|video|music", "params":{...}, "profile":"..."}
+  GET  /job/<id>                   status hasil (kalau async)
+  GET  /mode     ;  POST /mode {"capability":"image","warm":true}
+  GET  /capabilities               profil + biaya per kapabilitas
+  GET  /health
+
+Kebijakan "satu-satu" ditegakkan di sini (mutex), jadi butuh sisi server:
+workergroup harus max_workers=1, kalau tidak dua worker bisa memegang model berbeda.
+
+Jalankan:  uvicorn facade:app --host 127.0.0.1 --port 8090
+"""
+import asyncio
+import base64
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+SPEC_URL = os.environ.get("STACK_SPEC_URL", "https://huggingface.co/zakie0161/cfg-9f3a/resolve/main/spec.json")
+ENDPOINT = os.environ.get("STACK_ENDPOINT", "vs-a1")
+OUT_DIR = Path(os.environ.get("STACK_OUT", str(Path.home() / "stack-out")))
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from add_profiles import krea_graph, music_graph  # noqa: E402  (satu sumber kebenaran graph)
+
+app = FastAPI(title="vs-a1 facade")
+_state = {"mode": None, "lock": asyncio.Lock(), "busy": False, "jobs": {}}
+
+
+def spec():
+    with urllib.request.urlopen(SPEC_URL, timeout=60) as r:
+        return json.load(r)
+
+
+def build_graph(s, capability, profile, params):
+    """Graph API-format + substitusi parameter, per kapabilitas."""
+    if capability == "image":
+        return krea_graph(params.get("prompt", ""), params.get("aspect", "16:9"),
+                          float(params.get("megapixels", 1.0)), int(params.get("seed", 0)),
+                          int(params.get("steps", 8)))
+    if capability == "music":
+        return music_graph(params.get("caption", ""), params.get("lyrics", ""),
+                           float(params.get("seconds", 12)), int(params.get("seed", 0)),
+                           int(params.get("steps", 30)), float(params.get("cfg", 1.7)))
+    name = profile or "t2va-544p"
+    g = json.loads(json.dumps(s["profiles"][name]["graph"]))
+    for v in g.values():
+        ct, i = v.get("class_type"), v.get("inputs", {})
+        if ct == "MiniMaxH3ImageToVideo":
+            i["prompt"] = params.get("prompt", i.get("prompt"))
+            for k in ("width", "height", "length"):
+                if k in params:
+                    i[k] = int(params[k])
+        elif ct == "LoraLoaderModelOnly" and params.get("lora"):
+            i["lora_name"] = params["lora"]
+        elif ct == "MiniMaxH3SigmaShift" and params.get("shift"):
+            sv, sa = params["shift"].split("/")
+            i["shift_video"], i["shift_audio"] = float(sv), float(sa)
+        elif ct == "BasicScheduler" and params.get("steps"):
+            i["steps"] = int(params["steps"])
+        elif ct == "RandomNoise" and params.get("seed") is not None:
+            i["noise_seed"] = int(params["seed"])
+    return g
+
+
+def cost_of(s, capability, profile):
+    if capability in ("image", "music"):
+        return s["profiles"]["image-t2i" if capability == "image" else "music-t2m"]["cost"]
+    return s["profiles"][profile or "t2va-544p"]["cost"]
+
+
+def loudnorm(src, dst):
+    """Batasin biar nggak clipping (temuan QC: peak 0.0 dBFS)."""
+    try:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
+                        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", str(dst)],
+                       check=True, timeout=120)
+        return True
+    except Exception:
+        return False
+
+
+async def call_endpoint(graph, cost):
+    from vastai import Serverless  # SDK-nya sama yang dipakai CLI
+    s = spec()
+    body = {"input": {"request_id": "", "workflow_json": graph, "return_outputs_as_base64": True}}
+    client = Serverless()
+    try:
+        ep = await client.get_endpoint(name=ENDPOINT)
+        res = await ep.request("/generate/sync", body, cost=cost)
+        out = res.get("response") if isinstance(res, dict) and "response" in res else res
+        return out
+    finally:
+        await client.close()
+
+
+def harvest(out, capability):
+    """Simpan keluaran ke disk lokal; kembalikan daftar file."""
+    saved = []
+    for item in (out.get("output") or []):
+        blob = item.get("data") or item.get("base64") or item.get("b64")
+        name = item.get("filename") or f"{capability}_{int(time.time())}"
+        p = OUT_DIR / name
+        if blob:
+            p.write_bytes(base64.b64decode(blob))
+        elif item.get("url"):
+            with urllib.request.urlopen(item["url"], timeout=300) as r:
+                p.write_bytes(r.read())
+        else:
+            saved.append({"filename": name, "error": "respons nggak berisi data/base64/url",
+                          "keys": list(item.keys())})
+            continue
+        if capability == "music":
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
+                tf.write(p.read_bytes())
+                tmp = Path(tf.name)
+            if loudnorm(tmp, p):
+                tmp.unlink(missing_ok=True)
+        saved.append({"filename": name, "path": str(p), "bytes": p.stat().st_size})
+    return saved
+
+
+class Job(BaseModel):
+    capability: str
+    profile: str | None = None
+    params: dict = {}
+
+
+class Mode(BaseModel):
+    capability: str
+    warm: bool = True
+
+
+@app.get("/health")
+async def health():
+    return {"mode": _state["mode"], "busy": _state["busy"], "endpoint": ENDPOINT, "out": str(OUT_DIR)}
+
+
+@app.get("/capabilities")
+async def capabilities():
+    s = spec()
+    return {"capabilities": s.get("capabilities"),
+            "profiles": {k: {"capability": v["capability"], "cost": v["cost"], "label": v.get("label")}
+                         for k, v in s["profiles"].items()}}
+
+
+@app.post("/mode")
+async def set_mode(m: Mode):
+    if m.capability not in ("video", "image", "music"):
+        raise HTTPException(400, "capability harus video|image|music")
+    async with _state["lock"]:
+        _state["mode"] = m.capability
+        warm = None
+        if m.warm:
+            s = spec()
+            g = build_graph(s, m.capability, None, {"prompt": "warmup", "caption": "warmup", "lyrics": "warmup"})
+            t0 = time.time()
+            try:
+                out = await call_endpoint(g, cost_of(s, m.capability, None))
+                warm = {"ok": out.get("status") in ("completed", "done"), "seconds": round(time.time() - t0, 1)}
+            except Exception as e:
+                warm = {"ok": False, "error": str(e)[:200]}
+        return {"mode": m.capability, "warmup": warm}
+
+
+@app.get("/mode")
+async def get_mode():
+    return {"mode": _state["mode"]}
+
+
+@app.post("/job")
+async def job(j: Job):
+    if j.capability not in ("video", "image", "music"):
+        raise HTTPException(400, "capability harus video|image|music")
+    if _state["mode"] and _state["mode"] != j.capability:
+        raise HTTPException(409, f"mode aktif = {_state['mode']}; pindah dulu lewat POST /mode")
+    if _state["busy"]:
+        raise HTTPException(429, "worker sedang mengerjakan satu job (max_workers=1)")
+    _state["busy"] = True
+    jid = f"{j.capability}-{int(time.time())}"
+    try:
+        s = spec()
+        g = build_graph(s, j.capability, j.profile, j.params)
+        t0 = time.time()
+        out = await call_endpoint(g, cost_of(s, j.capability, j.profile))
+        wall = round(time.time() - t0, 1)
+        files = harvest(out, j.capability)
+        rec = {"id": jid, "capability": j.capability, "status": out.get("status"),
+               "wall_seconds": wall, "files": files}
+        _state["jobs"][jid] = rec
+        return rec
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"endpoint gagal: {str(e)[:300]}")
+    finally:
+        _state["busy"] = False
+
+
+@app.get("/job/{jid}")
+async def get_job(jid: str):
+    return _state["jobs"].get(jid) or {"error": "tidak ada job dengan id itu"}

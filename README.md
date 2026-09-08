@@ -27,3 +27,15 @@ menunjuk 18188 (bukan 8188 yang kena 401 caddy) → `BACKENDS_READY` tercetak �
 python3 tools/stackctl.py --spec stack/spec.example.json --list
 python3 tools/stackctl.py --spec <spec> --profile <nama> --local http://127.0.0.1:18188
 ```
+
+## Façade lokal (satu titik masuk, satu kapabilitas aktif)
+```bash
+pip install -r requirements.txt
+cd tools && uvicorn facade:app --port 8090
+curl -s localhost:8090/capabilities
+curl -s -XPOST localhost:8090/mode -d '{"capability":"image","warm":true}' -H 'content-type: application/json'
+curl -s -XPOST localhost:8090/job   -d '{"capability":"image","params":{"prompt":"...","aspect":"16:9"}}' -H 'content-type: application/json'
+```
+`POST /job {capability: video|image|music}` — satu-satunya titik masuk. Mutex mode ada di façade,
+jadi **sisi server wajib `max_workers=1`** kalau tidak, dua worker bisa memegang model berbeda.
+Output audio dilewatkan `loudnorm` (temuan QC: peak mentok 0 dBFS).
