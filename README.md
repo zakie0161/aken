@@ -28,19 +28,15 @@ python3 tools/stackctl.py --spec stack/spec.example.json --list
 python3 tools/stackctl.py --spec <spec> --profile <nama> --local http://127.0.0.1:18188
 ```
 
-## Façade: satu titik masuk, satu kapabilitas aktif
+## Jalankan
 ```bash
-openssl rand -hex 16                     # token sendiri, jangan pakai contoh
-
-docker build -t vs-a1-facade .
-docker run -d --name vs-a1-facade -p 8090:8090 \
-  -e STACK_API_KEY=<token> -e VAST_API_KEY=<key-vast> -e STACK_ENDPOINT=vs-a1 \
-  -v $HOME/stack-out:/root/stack-out vs-a1-facade
+cp .env.example .env      # isi VAST_API_KEY, STACK_API_KEY, STACK_ENDPOINT
+python3 app.py            # http://127.0.0.1:8090
 ```
-Tanpa `STACK_API_KEY`, auth **mati** - hanya boleh untuk localhost.
+Atau docker: `docker build -t vs-a1-facade . && docker run --env-file .env -p 8090:8090 vs-a1-facade`
 
 ```bash
-H=localhost:8090; TOK=<token>
+H=localhost:8090; TOK=<STACK_API_KEY>
 curl -s $H/health
 curl -s -H "Authorization: Bearer $TOK" $H/capabilities
 curl -s -XPOST $H/mode -H "Authorization: Bearer $TOK" -H 'content-type: application/json' \
@@ -48,11 +44,9 @@ curl -s -XPOST $H/mode -H "Authorization: Bearer $TOK" -H 'content-type: applica
 curl -s -XPOST $H/job   -H "Authorization: Bearer $TOK" -H 'content-type: application/json' \
      -d '{"capability":"image","params":{"prompt":"a red bicycle by a white wall, noon, no text"}}'
 ```
-Rute: `POST /job` (satu-satunya pintu kerja), `POST/GET /mode`, `GET /capabilities`,
-`GET /job/{id}`, `GET /health` (tanpa token, liveness). Semua yang berbayar butuh bearer token.
-
-Kalau dibuka ke jaringan: wajib di belakang reverse proxy + TLS (caddy/nginx).
-`VAST_API_KEY` hanya lewat env, tidak pernah ke-commit.
+Rute: `POST /job` (satu-satunya pintu kerja) · `POST/GET /mode` · `GET /capabilities` ·
+`GET /job/{id}` · `GET /health` (tanpa token, liveness). Semua berbayar butuh bearer token;
+kalau `STACK_API_KEY` kosong auth mati - hanya boleh localhost. Dibuka ke jaringan wajib TLS.
 
 ### Angka terukur (1x RTX 5090; worker ter-park lalu dibangunkan)
 | kapabilitas | bangun/ganti mode | job | keluaran |

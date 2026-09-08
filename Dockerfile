@@ -3,7 +3,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY tools/ ./tools/
-ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app/tools
+COPY app.py ./
+ENV PYTHONUNBUFFERED=1
 EXPOSE 8090
-CMD ["uvicorn","facade:app","--host","0.0.0.0","--port","8090"]
+CMD ["python3","app.py"]
