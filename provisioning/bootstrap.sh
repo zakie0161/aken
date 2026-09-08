@@ -70,6 +70,14 @@ install_pyworker() {
 
 main() {
   echo "$LOG mulai; workspace=$WS"
+  # preflight: host yang GPU-nya tidak terlihat dari container tidak akan pernah lulus
+  # benchmark. Lebih baik mati di detik pertama daripada setelah mengunduh puluhan GB.
+  if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi -L >/dev/null 2>&1; then
+    echo "$LOG [ERROR] GPU tidak terlihat dari container (nvidia-smi gagal) - host rusak, berhenti" >&2
+    nvidia-smi 2>&1 | head -3 >&2 || true
+    exit 42
+  fi
+  echo "$LOG GPU terlihat: $(nvidia-smi -L 2>/dev/null | head -1)"
   fetch_spec
   # Satu jalan: petakan kapabilitas -> file bobot, murni dari spec (capabilities/profiles/components).
   # STACK_ONLY=<kapabilitas> -> worker hanya unduh bobot kapabilitas itu + pakai benchmark ringan.
@@ -77,7 +85,7 @@ main() {
   local listfile="$WS/stack-files.list"
   rm -f "$listfile"
   $PY - "$SPEC" "${STACK_ONLY:-}" "$WORK" "$listfile" <<'PY' || die "gagal memproses spec"
-import json, os, re, sys
+import json, os, re, shutil, sys
 spec, only, work, listfile = (json.load(open(sys.argv[1])), (sys.argv[2] or "").strip().lower(),
                               sys.argv[3], sys.argv[4])
 WEIGHT = re.compile(r"([A-Za-z0-9_.\-]+\.(?:safetensors|ckpt|pt|pth|bin|onnx|gguf|ggml))")
@@ -109,6 +117,10 @@ with open(listfile, "w") as fh:
     for f in keep:
         fh.write("|".join([f["repo"], f["rev"], f["path"], f["subdir"], str(f.get("size", 0))]) + "\n")
 gb = sum(int(f.get("size", 0)) for f in keep) / 1e9
+free = shutil.disk_usage(os.path.dirname(os.path.abspath(work)) or "/").free / 1e9
+if free < gb * 1.08:
+    print(f"[stack] [ERROR] disk kurang: butuh {gb:.1f} GB + slack, tersedia {free:.1f} GB", file=sys.stderr)
+    sys.exit(1)
 print(f"[stack] unduh {len(keep)}/{len(files)} file = {gb:.1f} GB" + (f" (STACK_ONLY={only}, lewati {skipped})" if only else ""))
 
 os.makedirs(work, exist_ok=True)
