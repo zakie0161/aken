@@ -1,12 +1,206 @@
 # Setup Vast
 
-Config yang **sudah terbukti jalan** per 2026-09-08 (template dibuat baru tiap perubahan,
-bukan di-edit - lihat Catatan):
+Konfigurasi yang **terbukti jalan** per 2026-09-10 (template selalu dibuat baru, tidak diedit
+- lihat Catatan). Topologinya **satu endpoint per kapabilitas** - dan itu bukan selera, itu
+paksaan arsitektur Vast (lihat "perutean" di bawah):
 
 ```
-template aktif : id 704286  hash 333c488a608d26b7bc664268c65fa7a7  disk reservasi 100 GB
-endpoint aktif : 36613 vs-a1 (persisten, jangan dihapus)
+vs-a1   endpoint 36613 | workergroup 46456 | template 717951  STACK_ONLY=music  TER-PIN, melayani musik
+vs-i1   (belum ada endpoint - tergerbang kredit, lihat di bawah)
+vs-v1   (belum ada endpoint)
 ```
+
+## Perutean: kapabilitas TIDAK BISA dipisah lewat workergroup dalam satu endpoint
+Ini salah paham yang mahal, dan salahku sendiri. Bukti dari dua arah:
+
+1. **Permukaan API.** Body `/route/` (satu-satunya panggilan penentu worker) hanya berisi
+   `endpoint, api_key, cost, request_idx, replay_timeout` - **tidak** ada `template_id` /
+   `template_hash`. SDK juga tidak memilih grup di sisi klien (`_route` -> `refresh` -> selesai).
+   Jadi autoscaler *tidak mungkin* tahu sebuah request itu musik, image, atau video.
+2. **Dokumen Vast sendiri**: "Multiple Workergroups can exist within a single Endpoint...
+   Advanced use cases such as **mixed-model serving** ... please **contact Vast** for
+   assistance", dan artikelnya menjelaskan grup berbeda itu untuk **jenis GPU berbeda**,
+   dilayani "whichever Workergroup is most cost-effective".
+
+Konsekuensinya keras: kalau satu endpoint menaungi grup musik + grup image, request musik bisa
+dijawab worker image yang ComfyUI-nya tidak punya node musik - gagal, setelah kita membayar
+unduh 13 GB. Yang boleh berbagi endpoint hanyalah grup dengan **template identik** (bedanya
+pool hardware/kelas GPU). Irisan bobot per kapabilitas = endpoint berbeda. Grup lama `46116`
+(stack penuh, 71,5 GB terunduh) dihapus pemiliknya 2026-09-10, dan itu bukan kerugian: worker
+stack-penuh butuh ±33 menit unduh (71,5 GB @ ±36 MB/s) sementara `model_loading` Vast pernah
+kelihatan dibunuh setelah ±900-1200 dtk - jadi cold start stack-penuh **tidak akan pernah siap**.
+Satu grup untuk semua hanya sah bila workernya diparkir permanen, dan 71,5 GB parkir = ±$14/bln.
+
+## Kenapa dipisah per kapabilitas (terukur 2026-09-09)
+| | satu grup untuk semua | endpoint per kapabilitas |
+|---|---|---|
+| unduh worker baru | 71,5 GB = **12-22 menit** | musik 11,9 GB = **2 mnt 50 dtk** (terbukti) |
+| kelas GPU | dipaksa >=32 GB Blackwell | musik cukup 16 GB cc>=8.9 -> **24 host di zona lisensi**, median **$0,224/jam** vs 5090 $0,868 |
+| ganti kapabilitas | worker harus memuat bobot lain (5-90 dtk) | tidak ada - endpoint berbeda |
+
+Yang TIDAK bisa diturunkan kelasnya: bobot video & image memakai format **NVFP4** (butuh tensor
+core Blackwell, `compute_cap>=1200`) dan video menyentuh **peak VRAM 31,95 GB** (terukur). Jadi
+fallback GPU murah hanya sah untuk musik.
+
+### Gerbang kredit saat `create endpoint` - aturannya sudah terkodekan (terukur 2026-09-10)
+```
+403: error: insufficient credit $7.49. You need an additional $2.51 to create endpoint # 2.
+403: error: insufficient credit $10.32. You need an additional $4.68      <- saat endpoint #3
+```
+Aturannya **bukan** harga offer termahal (dugaanku kemarin, salah - dua datapoin membantahnya):
+saldo minimum = **$5 x jumlah endpoint sesudah dibuat**. Endpoint #2 minta $10,00 tepat
+($7,49 + $2,51), endpoint #3 minta $15,00 tepat ($10,32 + $4,68). `create endpoint` juga
+**tidak punya** flag query/harga - jadi cadangan ini tidak bisa dikecilkan dengan memperketat
+filter; satu-satunya tuas adalah saldo. Kerja berurutan yang benar: endpoint musik dulu (sudah
+ada), lalu image ($10), lalu video ($15).
+
+### Filter yang benar-benar diterima `workergroup --search_params`
+`geolocation in [...]` **bekerja**; `reliability2>=0.99` **bekerja** di workergroup (keduanya
+ditolak di `search_params` *template*). Verifikasi selalu dengan `vastai show workergroups --raw`
+lalu baca `search_query` - jangan berasumsi filtermu masuk.
+
+Dua hal yang membuat filter kita **tidak pernah mendarat** sampai 2026-09-11 siang:
+1. `vastai update workergroup <id> --search_params "..."` menjawab `Failed with error 400: error:
+   Missing endpoint ID` kalau `--endpoint_id` tidak ikut diserahkan. Kegagalannya senyap di
+   skrip yang hanya melihat exit code pipeline, jadi catatan "sudah dipasang" bisa salah selama
+   berminggu-minggu sementara server hidup dengan **tanpa filter apa pun**.
+2. Karena itu satu-satunya pembatas yang benar-benar aktif adalah yang terbaca di server. Baca
+   balik selalu: `vastai show workergroups --raw | grep -A20 46456`.
+
+Kondisi aktif sekarang (grup musik 46456, terbaca balik dari server):
+```
+direct_port_count>0  disk_space>=40  dph_total<=0.30  gpu_ram>=16  num_gpus=1
+inet_down_cost<=0.005  rentable  rented=false  verified
+```
+`inet_down_cost` adalah **harga bandwidth masuk per GB** dan ia sah di workergroup maupun
+`search offers` - field yang tampak mirip, `internet_down_cost_per_tb`, **tidak** bisa difilter
+(selalu 0 offer). Kenapa penting: tagihan asliku menunjukkan tarif yang muncul $0,001-$0,042/GB
+untuk pekerjaan yang sama, dan `bwd` adalah 39% dari seluruh belanja endpoint (973,8 GB = $4,57
+dari $11,61). Satu-satunya cara memilih harga itu adalah filter ini. `disk_space>=40` menjaga agar
+host yang tidak muat menampung image + bobot tidak direkrut sama sekali; `direct_port_count>0`
+menjaga host yang port-nya tidak bisa dicapai tidak direkrut.
+
+### ⚠️ Benchmark worker: jangan sodorkan graph bobot penuh (akar "unavailable" yang sesungguhnya)
+Terukur 2026-09-11, worker 50486887. Log container worker:
+
+```
+11:50:51 Queued synchronous request test-38661        <- probe benchmark dari autoscaler
+         ComfyUI ready after 0.0s -> Submitted -> WebSocket connected
+         Model ...TEModel prepared for dynamic VRAM loading. 8758MB Staged
+11:50:53 Worker Status: max_perf=0.0 cur_perf=0        <- belum selesai, belum dinilai
+(autoslacer) error message: No successful responses from benchmark -> rebooting
+```
+
+Jendela probe-nya **±11 detik** antara `model_loading (first load)` dan vonis. Vast mengulang
+reboot tiap ±50 detik tanpa henti. Selama worker terjebak di sini endpoint tidak punya siapa-siapa,
+gejala di sisi klien: `no workers available` - persis keluhan yang dok `quickstart#troubleshooting`
+jawab dengan "cek VRAM / nama model / HF_TOKEN". Untuk kasus kami ketiganya tidak bersalah:
+yang bersalah adalah **kami sendiri**, karena `bootstrap.sh` memasang graph kapabilitas (yang harus
+memuat bobot belasan GB ke VRAM) sebagai `benchmark.json`. Tidak ada graph bobot penuh yang bisa
+lulus 11 detik, di host mana pun, selamanya.
+
+Aturan sekarang:
+1. **Worker memakai benchmark bawaan image** (SD1.5, hitungan detik). `bootstrap.sh` tidak
+   memasang `benchmark.json` lagi secara diam-diam, dan menghapus sisa lama di disk worker.
+2. `STACK_BENCH=spec|slice` mengembalikan perilaku lama kalau suatu hari jendela probe Vast
+   melebar atau kita benar-benar butuh `measured_perf` yang representatif. Defaultnya aman.
+3. Konsekuensi yang diterima sadar: `measured_perf` diukur dari SD1.5, jadi terlalu optimis untuk
+   bobot kita. Karena `min_load=0` dan `max_workers` kecil, autoscaler tidak pakai angka itu untuk
+   menahan kapasitas kita; yang perlu dijaga justru `target_util`/`max_queue_time`.
+4. Kalau muncul `No successful responses from benchmark` di `get wrkgrp-logs`: **jangan** perbesar
+   `BENCHMARK_TEST_STEPS` (itu memperpanjang, bukan memperpendek) - pastikan worker jatuh ke
+   benchmark bawaan image.
+
+## ⚠️ Vast mengenali "worker siap" dari BARIS LOG - jangan pernah pakai tag image melayang
+Terukur 2026-09-10. Dari log autoscaler sendiri:
+
+```
+[DEBUG] Got log line indicating model is loaded: INFO:main:BACKENDS_READY: 1 backend(s) ready to serve
+```
+
+Kesiapan worker adalah **pencocokan teks log**, bukan health check. Hari itu Vast mempush image
+ComfyUI versi baru; template yang berte-tag `@vastai-automatic-tag` (= "selalu tag terbaru")
+langsung memakainya, format log berubah, pencocok tidak pernah kena - worker **selamanya**
+`model_loading` dan endpoint hanya mengulang `failed to find rdy worker`. Tanpa error, tanpa
+/tagihan berarti, tanpa knob yang memperbaiki. Lima host berbeda gagal persis sama.
+
+Aturan yang berlaku sekarang:
+1. **Pin tag image** (`--image_tag v0.34.0-cuda-12.9-py312`). Jangan `@vastai-automatic-tag`.
+   Upgrade image harus jadi keputusan kita, bukan kejutan di tengah produksi.
+2. **`--disk` wajib**, dan ia hanya ada di dalam `--launch_args`: `--launch_args "--disk 24"`.
+   Tanpa reservasi disk provisioning berhenti diam-diam: `model_loading` selamanya dengan
+   **nol byte terunduh** (kredit flat, `disk_usage 0`). Ini bukan kegagalan host - ini konfigurasi.
+3. **`dph_total<=X` wajib.** Serverless tidak punya knob harga; query workergroup satu-satunya
+   tempat harga bisa dibatasi. Musik: `dph_total<=0.30` tetap 57-64 host (median $0,171/jam);
+   tanpanya aku membayar host ~$1/jam untuk kerja yang sama. Kunci yang diterima `dph_total`;
+   `price` / `max_price` / `reliability2` **tidak** dikenal `search offers`.
+4. Jangan lewat query lewat shell tanpa kutip: `>=` adalah **redirect**, filtermu hilang tanpa
+   suara dan tampak seperti "0 offer".
+
+### Cold path terukur, setelah ketiganya benar
+| fase | waktu | bytes |
+|---|---|---|
+| rekrut host | 12 dtk | - |
+| tarik image (host sudah ber-cache) | ±90 dtk | - |
+| tarik image (host kosong) | 212 dtk | 8,2 GB @ 38,7 MB/s |
+| unduh satu irisan bobot | ±4 menit | 11,9 GB @ ±36 MB/s |
+| **worker `ready`** | **403 dtk** | seluruhnya **$0,04** |
+
+Vast menyerah di ±300 dtk pada fase `creating` dan ±1200 dtk total, jadi provisioning harus muat
+di dalamnya - itulah alasan sesungguhnya untuk irisan per kapabilitas (`STACK_ONLY`), bukan
+sekadar hemat bandwidth. Registry Vast dan Hugging Face ternyata secepat-sama (38,7 vs 36 MB/s),
+jadi membake bobot ke image sendiri **tidak menghemat waktu**.
+
+> Koreksi 2026-09-11: yang tidak kuhitung waktu itu adalah **siapa yang ditagih**. `show
+> invoices-v1 -f tree -v` memecah tagihan menjadi `gpu / disk / bwd / bwu`, dan GB pada baris
+> `bwd` selalu sama persis dengan bobot yang kuunduh sendiri (25,3 vs 25,1; 13,3 vs 13,2) -
+> image ComfyUI ±18 GB yang di-`docker pull` **tidak pernah masuk tagihan**. Kesimpulan "bake"
+> tidak menghemat apa pun masih benar untuk *kecepatan*, tapi untuk *biaya* ia menghapus baris
+> `bwd` seluruhnya. Jalur `vastai take snapshot` tetap mati (bukti di notes), jadi jalurnya
+> build-di-VM-Vast -> push registry, dan itu belum diuji.
+
+### Volume vs instance diparkir — terukur 2026-09-10 di host nyata
+Vast punya *volume*, tapi volumenya **terikat fisik ke satu mesin** (docs: "can only be attached
+to instances running on the same physical machine"), dan pasar storage lintas-host
+(`search network-volumes`) kosong. Jadi volume tidak menyelamatkan kita dari unduh ulang ketika
+worker berpindah host. Yang menyelamatkan adalah hal lain: **storage container instance yang
+di-`stop` juga bertahan** — dan itu jauh lebih murah daripada kelihatannya:
+
+| kejadian | terukur di RTX PRO 4000 ($0,2185/jam) |
+|---|---|
+| unduh irisan image 13,2 GB (sekali, host baru) | 175 dtk = **75 MB/s** |
+| bootstrap ulang di disk yang sama | **4,5 dtk** (semua `skip`) |
+| `stop instance` → `start instance` | **12 dtk → 12 dtk**, host sama, bobot utuh |
+| render image 1344×736 8 steps | **31,85 dtk**, VRAM 12,3 GiB |
+| biaya seluruh rangkaian tes | **$0,188** |
+
+Rumusnya: parkir = `GB × storage_cost × 720 jam`. Di host contoh ($0,333/GB-bulan) itu $4,33/bulan
+untuk 13,2 GB dan $10-14/bulan untuk 44,4 GB, sementara unduh ulang cuma $0,17. **Kesimpulan:**
+irisan kecil (≤15 GB) lebih baik dingin; irisan besar (≥40 GB) lebih baik diparkir, karena unduhnya
+sendiri tidak muat di tenggat `model_loading` Vast. Sewa instance 24/7 tidak pernah masuk akal:
+$0,20/jam = $144/bulan.
+
+Catatan penting untuk mode instance biasa: ComfyUI image Vast berada di
+`/opt/workspace-internal/ComfyUI` dengan venv `/venv/main` (bukan `/workspace/ComfyUI` seperti di
+worker serverless - gerbangnya env `SERVERLESS`), dan image sudah menjalankan ComfyUI lewat
+supervisor. Image itu juga membawa `/opt/comfyui-api-wrapper` yang melayani **`/generate/sync`**,
+rute yang sama dengan yang dipakai worker - jadi memanggil instance langsung tidak memerlukan
+klien baru, hanya URL + SSH tunnel.
+
+### Gotcha graph: index output link
+Link input di graph API berbentuk `[id_node, index_output]`. Node dengan satu output
+(mis. `KSampler`) **hanya** punya index 0; menulis index 1 membuat ComfyUI menolak seluruh graph
+dengan `Exception when validating inner node: tuple index out of range` - pesan yang sama sekali
+tidak menyebut node yang salah, dan mudah disalahartikan sebagai kegagalan GPU/worker. Node
+bermulti-output (`SamplerCustomAdvanced`: MODEL di 0, LATENT di 1) memang butuh index 1. Selalu
+validasi graph ke `/prompt` sekali sebelum sebuah profil dimasukkan ke spec.
+
+### Watchdog readiness di API
+`higgsgen-api` mengambil snapshot worker tiap 30 dtk (dipantik dari `/health`, bukan dari
+startup hook - lihat komentar `_ensure_watchdog`) dan menyoraki worker yang terjebak
+`creating/loading/model_loading` lebih dari `HIGGSGEN_WORKER_STALL=480` dtk. Gejala insiden ini
+tadinya cuma "request menggantung sampai timeout"; sekarang jadi satu baris peringatan di log
+plus `workers` yang jujur di `/api/health`.
 
 ```bash
 RAW=https://raw.githubusercontent.com/zakie0161/aken/main
@@ -92,17 +286,29 @@ sudah dipasang), disk bisa turun ke ~40 GB **dan** cold wake jauh lebih cepat: 1
 |---|---|---|
 | `idle` dengan `cold_workers=1` | **$0.507/jam = $12/hari** | GPU + disk dicadangkan, worker hidup terus |
 | `stopped`, bobot masih di disk (`cold_workers=0`) | **$0.024/jam = $0.57/hari** | hanya reservasi storage 100 GB yang tertagih; wake ±90 detik |
-| workergroup dihapus | **$0** | endpoint tetap ada; pakai lagi = provisioning ±22 menit |
+| ~~workergroup dihapus~~ | $0 | **DILARANG** - lihat aturan di bawah |
 
-`cold_workers=1` pada dasarnya **menyewa satu RTX 5090 permanen**. Untuk pemakaian pribadi yang
-tidak terus-menerus, biarkan `cold_workers=0`: worker padam sendiri ±70 detik setelah sepi, dan
-request berikutnya bangun ±90 detik (bobot belum dibuang). Kalau ditinggal bermalam dan tidak
-akan dipakai, hapus workergroup-nya supaya jadi $0:
+`cold_workers=1` pada dasarnya **menyewa satu RTX 5090 permanen**, jadi endpoint ini dijalankan
+dengan `cold_workers=0`: worker padam sendiri ±70 detik setelah sepi, request berikutnya bangun
+±90 detik karena bobotnya masih di disk.
+
+### ATURAN PEMILIK: JANGAN hapus workergroup
+Workergroup (dan worker-nya) **tidak boleh dihapus**, meskipun kelihatan $0 itu lebih murah.
+Alasannya: penghapusan memaksa worker baru men-download ulang seluruh bobot dari nol.
+Terukur di `vastai show invoices`:
+
+```
+Instance_<id>_download_charge: GB_*$/.GB   72,100   0,003   0,188
+```
+
+Jadi satu siklus hapus-buat = ±72 GB transfer (plus ±22 menit provisioning). Simpan
+workergroup-nya, biarkan `cold_workers=0` yang mengurus biaya. Yang boleh diubah-ubah hanyalah
+**parameter endpoint** (`update endpoint`), bukan workergroup:
 
 ```bash
-vastai delete workergroup <ID>                       # $0/jam, endpoint 36613 tetap utuh
-vastai create workergroup --template_hash $(cut -d' ' -f2 /tmp/finaltpl.txt) \
-  --endpoint_name vs-a1 --gpu_ram 32                 # hidupkan lagi saat mau dipakai
+vastai update endpoint 36613 --cold_workers 0 --inactivity_timeout 300   # aman, tidak mengganti worker
+# JANGAN: vastai delete workergroup ...   (perintahnya sengaja tidak ditulis di sini)
+# JANGAN: vastai update workergroup ... --launch_args/--template_hash (bisa memicu worker baru = unduh ulang)
 ```
 
 Karena provisioning penuh bisa 22 menit, `max_queue_time` dinaikkan ke **1800** agar request

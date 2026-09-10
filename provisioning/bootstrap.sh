@@ -80,8 +80,9 @@ main() {
   echo "$LOG GPU terlihat: $(nvidia-smi -L 2>/dev/null | head -1)"
   fetch_spec
   # Satu jalan: petakan kapabilitas -> file bobot, murni dari spec (capabilities/profiles/components).
-  # STACK_ONLY=<kapabilitas> -> worker hanya unduh bobot kapabilitas itu + pakai benchmark ringan.
-  # Tanpa itu: semua file + benchmark bawaan spec (perilaku lama).
+  # STACK_ONLY=<kapabilitas> -> worker hanya unduh bobot kapabilitas itu.
+  # Benchmark worker: bawaan image, KECUALI STACK_BENCH=spec|slice (lihat blok python).
+  # Tanpa STACK_ONLY: semua file + benchmark sesuai STACK_BENCH.
   local listfile="$WS/stack-files.list"
   rm -f "$listfile"
   $PY - "$SPEC" "${STACK_ONLY:-}" "$WORK" "$listfile" <<'PY' || die "gagal memproses spec"
@@ -125,14 +126,27 @@ print(f"[stack] unduh {len(keep)}/{len(files)} file = {gb:.1f} GB" + (f" (STACK_
 
 os.makedirs(work, exist_ok=True)
 profiles = {k: v for k, v in profs.items() if not only or str(v.get("capability", "")).lower() == only}
-bench = spec.get("benchmark")
-if only and profiles:
+# Benchmark = probe kesiapan yang dipakai autoscaler untuk menilai worker. Jendela probe-nya
+# pendek (~11 dtk setelah first load): kalau tidak ada respons sukses, Vast menyatakan
+# "No successful responses from benchmark" dan me-reboot worker - selamanya. Graph bobot penuh
+# (puluhan GB yang harus masuk VRAM) tidak akan pernah lulus jendela itu, jadi BAWAAN IMAGE
+# (SD1.5, hitungan detik) yang dipakai kecuali diminta eksplisit lewat STACK_BENCH.
+bench_mode = (os.environ.get("STACK_BENCH") or "").strip().lower()
+bench = None
+if bench_mode == "spec":
+    bench = spec.get("benchmark")
+    print("[stack] benchmark: graph bawaan spec (STACK_BENCH=spec)")
+elif bench_mode == "slice" and profiles:
     pick = sorted(profiles.items(), key=lambda kv: (kv[1].get("cost") or 0, kv[0]))[0]
     bench = pick[1].get("graph")
-    print(f"[stack] benchmark ringan: profil {pick[0]} (cost {pick[1].get('cost')}) bukan graph bawaan spec")
+    print(f"[stack] benchmark: profil ringan {pick[0]} (STACK_BENCH=slice) - BERISIKO reboot loop")
+else:
+    print("[stack] benchmark: pakai bawaan image (bukan graph bobot penuh - tidak muat di jendela probe autoscaler)")
 missing = (names(bench) - {f["path"].rsplit("/", 1)[-1] for f in keep}) if bench else set()
 if missing: print(f"[stack] [WARN] graph benchmark menyebut file yang tidak diunduh: {sorted(missing)}", file=sys.stderr)
-if bench: open(f"{work}/benchmark.json", "w").write(json.dumps(bench, indent=1))
+stale = f"{work}/benchmark.json"
+if bench: open(stale, "w").write(json.dumps(bench, indent=1))
+elif os.path.exists(stale): os.remove(stale); print("[stack] benchmark lama dihapus agar worker jatuh ke bawaan image")
 if profiles: open(f"{work}/profiles.json", "w").write(json.dumps(profiles, indent=1))
 PY
 
